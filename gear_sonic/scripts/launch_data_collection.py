@@ -70,11 +70,6 @@ def _bootstrap_venv():
     os.execv(str(venv_python), [str(venv_python)] + sys.argv)
 
 
-_bootstrap_venv()
-
-import tyro
-
-
 def _get_local_ip() -> str:
     """Best-effort detection of the PC's LAN IP address."""
     try:
@@ -609,6 +604,9 @@ def _signal_handler(sig, frame):
 
 
 if __name__ == "__main__":
+    _bootstrap_venv()
+    import tyro
+
     signal.signal(signal.SIGINT, _signal_handler)
     config = tyro.cli(DataCollectionLaunchConfig)
     main(config)

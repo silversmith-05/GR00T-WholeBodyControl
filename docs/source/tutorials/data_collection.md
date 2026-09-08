@@ -4,7 +4,7 @@ Record teleop demonstrations as [LeRobot](https://github.com/huggingface/lerobot
 
 ```{admonition} Deployment model
 :class: important
-Everything runs **offboard on your workstation** except the **camera server**, which runs **onboard the robot computer** (e.g., Jetson Orin) where the physical cameras are connected. The camera server publishes JPEG frames over ZMQ to the workstation.
+In the default wired setup, everything runs **offboard on your workstation** except the **camera server**, which runs **onboard the robot computer** (e.g., Jetson Orin) where the physical cameras are connected. The camera server publishes JPEG frames over ZMQ to the workstation. For a workstation connected only over Wi-Fi, use [Wireless NX + Workstation](#wireless-nx-workstation) to run C++ deployment on the NX instead.
 ```
 
 ```{admonition} Supported cameras
@@ -41,7 +41,7 @@ This environment is separate from `.venv_teleop` and `.venv_sim` — the data ex
 
 ## Camera Server Setup (On-Robot)
 
-The camera server is the **only component that runs on the robot computer** (e.g., Jetson Orin). Everything else — the C++ deployment, PICO teleop streamer, data exporter, and camera viewer — runs on your workstation.
+In the default wired setup, the camera server is the **only component that runs on the robot computer** (e.g., Jetson Orin). Everything else — the C++ deployment, PICO teleop streamer, data exporter, and camera viewer — runs on your workstation. In the wireless setup, C++ deployment also runs on the NX; camera server setup is the same.
 
 The camera server captures frames from the OAK cameras physically connected to the robot and publishes them over ZMQ to the workstation.
 
@@ -178,7 +178,7 @@ Images are JPEG-compressed (quality 80) and either base64-encoded strings or raw
 
 ## Architecture
 
-The data exporter receives data from three ZMQ sources. The C++ deployment, PICO teleop, and data exporter all run **offboard on the workstation**. The camera server runs **onboard the robot** and streams frames to the workstation over the network.
+The data exporter receives data from three ZMQ sources. In the default wired setup shown below, the C++ deployment, PICO teleop, and data exporter all run **offboard on the workstation**. The camera server runs **onboard the robot** and streams frames to the workstation over the network.
 
 ```text
     Workstation (offboard)                           Robot (onboard)
@@ -214,7 +214,7 @@ The data exporter receives data from three ZMQ sources. The C++ deployment, PICO
 
 ## Running Data Collection
 
-There are two ways to run the data collection stack: an **all-in-one tmux launcher** (recommended) or **manual multi-terminal setup**.
+Use the **all-in-one tmux launcher** or **manual multi-terminal setup** for wired deployment, or the **wireless launcher** to split the stack between an NX and a workstation.
 
 ### Option A: All-in-One Tmux Launch (Recommended)
 
@@ -371,6 +371,100 @@ All options are provided via CLI flags — no interactive prompts.  Key flags:
 Datasets are saved under `<root-output-dir>/<dataset-name>/`.  If `--dataset-name`
 is not specified, a timestamped name is generated automatically.
 ```
+
+(wireless-nx-workstation)=
+### Option C: Wireless NX + Workstation
+
+Use `launch_data_collection_wireless.py` when the workstation and NX share a
+Wi-Fi router, and only the NX has an Ethernet connection to the robot controller.
+Run the script locally on each machine with its corresponding role:
+
+```text
+Workstation 192.168.3.2 <-- Wi-Fi router --> NX 192.168.3.164
+  PICO teleop                               C++ deploy
+  Data exporter                             Camera server (existing service)
+  Camera viewer + browser preview              |
+                                           Ethernet 192.168.123.x
+                                              |
+                                           Robot controller
+```
+
+Both machines need the repository and `tmux`. The launcher itself uses only
+Python's standard library. On the NX, build and configure `gear_sonic_deploy`
+(including model files and TensorRT), and keep the camera server running as
+described above. On the workstation, prepare `.venv_teleop` and
+`.venv_data_collection` using the existing install scripts. The NX does not need
+those two workstation environments.
+
+**1. On NX (`192.168.3.164`), start C++ deployment:**
+
+```bash
+python gear_sonic/scripts/launch_data_collection_wireless.py --nx
+```
+
+Complete the existing `deploy.sh` confirmation in the NX tmux pane and wait for
+`Init done`. By default, the launcher selects the interface with a
+`192.168.123.x` address for robot DDS traffic. If it cannot identify exactly one
+such interface, specify the NX Ethernet interface explicitly:
+
+```bash
+python gear_sonic/scripts/launch_data_collection_wireless.py --nx \
+    --deploy-interface eth0
+```
+
+Replace `eth0` with the actual NX robot-facing interface. The deploy process
+subscribes to workstation teleop at `192.168.3.2:5556` and publishes robot state
+on NX port `5557`. `--nx` starts only C++ deploy; it uses the existing NX camera
+server rather than starting another camera process.
+
+**2. On the workstation (`192.168.3.2`), start the remaining collection programs:**
+
+```bash
+python gear_sonic/scripts/launch_data_collection_wireless.py --workstation \
+    --task-prompt "pick up the cup"
+```
+
+This starts PICO teleop, the data exporter, the OpenCV camera viewer, and the
+browser preview. Configure the PICO PC connection to use `192.168.3.2`.
+Open [the camera preview](http://192.168.3.2:8080) from the LAN, or
+[the local preview](http://localhost:8080) on the workstation.
+
+| Connection | Endpoint |
+|---|---|
+| NX deploy subscribes to workstation teleop | `192.168.3.2:5556` |
+| Workstation teleop **feedback** and exporter subscribe to NX state | `192.168.3.164:5557` |
+| Workstation exporter subscribes to local SMPL poses and recording controls | `127.0.0.1:5556` |
+| Workstation exporter and previews connect to NX cameras | `192.168.3.164:5555` |
+
+Allow these TCP connections through the machines' firewalls and disable router
+client isolation if enabled. The robot DDS connection stays on the NX's wired
+network; the default Dex3 stack does not require forwarding `192.168.123.x` to
+the workstation. If using `--hand-backend inspire`, pass it on **both** machines;
+the hand driver runs within workstation teleop, so its hand IPs must additionally
+be reachable from the workstation through separately configured routing.
+
+Use `--nx-host` and `--workstation-host` on both machines to change the default
+Wi-Fi addresses. `--camera-host` can override just the camera address. Existing
+options such as `--deploy-checkpoint`, `--deploy-motor-kp-scale`,
+`--record-wrist-cameras`, `--dataset-name`, `--no-camera-viewer`, and
+`--no-camera-web` are also available. Run `--help` for the full list.
+
+Append `--dry-run` to either command to print its local commands without checking
+installed environments or starting anything. Append `--no-attach` to start its
+tmux session in the background. Existing sessions are preserved; reattach to them
+instead of starting another instance:
+
+```bash
+# On NX
+tmux attach -t sonic_data_collection_nx
+# On workstation
+tmux attach -t sonic_data_collection_workstation
+```
+
+Use `Ctrl+b`, then `d` to detach. To stop a session, run
+`tmux kill-session -t sonic_data_collection_nx` on NX or
+`tmux kill-session -t sonic_data_collection_workstation` on the workstation.
+The two sessions are independent: stopping one does not stop the other.
 
 ### Recording Controls
 
