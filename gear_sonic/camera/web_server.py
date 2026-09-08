@@ -46,10 +46,13 @@ select { color:#e5edf7; background:#203044; border:1px solid #547192; border-rad
 #preview[hidden], #stream-source { display:none; }
 .view-card { display:grid; grid-template-rows:auto minmax(0,1fr); min-width:0; min-height:0;
   overflow:hidden; background:#080c12; border:1px solid #34465d; border-radius:8px; }
-.view-handle { width:100%; min-width:0; margin:0; padding:5px 8px; border:0; border-radius:0;
+.view-toolbar { display:flex; min-width:0; background:#203044; }
+.view-handle { flex:1; min-width:0; margin:0; padding:5px 8px; border:0; border-radius:0;
   text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   cursor:grab; touch-action:none; user-select:none; }
-.view-handle:focus-visible { outline:2px solid #79bfff; outline-offset:-2px; }
+.view-rotate { flex-shrink:0; margin:0; padding:5px 8px; border:0; border-left:1px solid #34465d;
+  border-radius:0; font-variant-numeric:tabular-nums; }
+.view-toolbar button:focus-visible { outline:2px solid #79bfff; outline-offset:-2px; }
 .view-card.dragging { opacity:.6; }
 .view-card.drop-target { outline:2px solid #79bfff; outline-offset:-2px; }
 .view-card canvas { width:100%; height:100%; min-width:0; min-height:0; object-fit:contain; }
@@ -57,13 +60,13 @@ select { color:#e5edf7; background:#203044; border:1px solid #547192; border-rad
 small { grid-row:6; color:#9aacc5; font-size:11px; white-space:nowrap;
   overflow:hidden; text-overflow:ellipsis; }
 .viewer-expanded main { padding:0; }
-.viewer-expanded header { position:fixed; top:12px; right:12px; z-index:2; }
+.viewer-expanded header { position:fixed; bottom:8px; right:12px; z-index:2; }
 .viewer-expanded header h1, .viewer-expanded #source,
 .viewer-expanded fieldset, .viewer-expanded small { display:none; }
-.viewer-expanded #preview { position:fixed; inset:0; width:100%; height:100vh;
-  height:100dvh; padding:6px; background:#080c12; z-index:1; }
-.viewer-expanded #status { position:fixed; bottom:12px; left:12px; z-index:2;
-  max-width:calc(100% - 24px); padding:6px 10px; border-radius:6px; background:#10151ee6; }
+.viewer-expanded #preview { position:fixed; inset:0 0 44px; width:100%; height:calc(100vh - 44px);
+  height:calc(100dvh - 44px); padding:6px; background:#080c12; z-index:1; }
+.viewer-expanded #status { position:fixed; bottom:8px; left:12px; z-index:2;
+  max-width:calc(100% - 180px); padding:6px 10px; border-radius:6px; background:#10151ee6; }
 @media (max-height:500px), (max-width:600px) {
   main { padding:6px 8px; gap:4px; }
   h1 { font-size:17px; }
@@ -72,7 +75,7 @@ small { grid-row:6; color:#9aacc5; font-size:11px; white-space:nowrap;
   button { padding:3px 8px; margin-bottom:4px; }
   header button { margin:0; }
   #preview { gap:4px; }
-  .view-handle { padding:3px 5px; font-size:12px; }
+  .view-handle, .view-rotate { padding:3px 5px; font-size:12px; margin:0; }
 }
 </style>
 <main><header><h1>SONIC Camera Preview</h1>
@@ -88,7 +91,7 @@ small { grid-row:6; color:#9aacc5; font-size:11px; white-space:nowrap;
 <button id="reset-layout" type="button">Reset layout</button></span>
 <div id="cameras"></div></fieldset>
 <div id="preview" class="offline" aria-label="Camera windows" hidden></div>
-<small>Drag a view's title to rearrange, or focus it and use arrow keys. Layout is saved in this browser.</small></main>
+<small>Drag titles to rearrange (or use arrow keys). Each rotate button turns its image 90&deg;. Layout is saved in this browser.</small></main>
 <img id="stream-source" alt="" hidden>
 <script>
 const preview = document.getElementById('preview');
@@ -109,6 +112,7 @@ document.addEventListener('keydown', event => {
 });
 const controls = new Map();
 const cards = new Map();
+const rotations = new Map(); // Clockwise quarter turns, saved separately for each camera.
 let latest = null;
 let selection = null; // null means all views, including newly discovered cameras.
 let storageKey = null;
@@ -127,8 +131,11 @@ function orderedNames(names) {
   return [...viewOrder.filter(name => names.includes(name)), ...names.filter(name => !viewOrder.includes(name))];
 }
 function saveLayout() {
-  try { if (layoutKey) localStorage.setItem(layoutKey, JSON.stringify({order:viewOrder,columns:columnPreference})); }
-  catch (_) {}
+  try {
+    if (layoutKey) localStorage.setItem(layoutKey, JSON.stringify({
+      order:viewOrder, columns:columnPreference, rotations:Object.fromEntries(rotations)
+    }));
+  } catch (_) {}
 }
 function layoutGrid() {
   const count = preview.children.length;
@@ -169,17 +176,33 @@ function finishDrag(event) {
   for (const card of cards.values()) card.element.classList.remove('dragging', 'drop-target');
   if (event.type === 'pointerup' && previous.active && previous.target) moveView(previous.name, previous.target);
 }
+function updateRotation(card, name) {
+  const angle = (rotations.get(name) || 0) * 90;
+  card.rotate.textContent = String.fromCharCode(0x21bb) + ' ' + angle + String.fromCharCode(176);
+  card.rotate.title = 'Rotate ' + name + ' 90 degrees clockwise (current ' + angle + ' degrees)';
+  card.rotate.setAttribute('aria-label', card.rotate.title);
+}
 function makeCard(name) {
   const element = document.createElement('article');
   element.className = 'view-card'; element.dataset.camera = name;
+  const toolbar = document.createElement('div');
+  toolbar.className = 'view-toolbar';
   const handle = document.createElement('button');
   handle.type = 'button'; handle.className = 'view-handle';
   handle.setAttribute('aria-label', 'Move ' + name);
   handle.title = 'Drag to rearrange. Arrow keys also move this view.';
+  const rotate = document.createElement('button');
+  rotate.type = 'button'; rotate.className = 'view-rotate';
   const canvas = document.createElement('canvas');
   canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', name + ' live camera');
-  element.append(handle, canvas);
-  const card = {element,handle,canvas,context:canvas.getContext('2d')};
+  toolbar.append(handle, rotate);
+  element.append(toolbar, canvas);
+  const card = {element,handle,rotate,canvas,context:canvas.getContext('2d')};
+  updateRotation(card, name);
+  rotate.onclick = () => {
+    rotations.set(name, ((rotations.get(name) || 0) + 1) % 4);
+    saveLayout(); updateRotation(card, name);
+  };
   handle.onpointerdown = event => {
     if (event.button !== 0) return;
     drag = {name,pointerId:event.pointerId,x:event.clientX,y:event.clientY,active:false,target:null};
@@ -220,11 +243,20 @@ function paintFrames(now) {
   sourceNames.forEach((name,index) => {
     const card = cards.get(name);
     if (!card || height <= 32) return;
-    if (card.canvas.width !== width || card.canvas.height !== height-32) {
-      card.canvas.width = width; card.canvas.height = height-32;
+    const imageHeight = height - 32;
+    const turns = rotations.get(name) || 0;
+    const outputWidth = turns % 2 ? imageHeight : width;
+    const outputHeight = turns % 2 ? width : imageHeight;
+    if (card.canvas.width !== outputWidth || card.canvas.height !== outputHeight) {
+      card.canvas.width = outputWidth; card.canvas.height = outputHeight;
     }
+    card.context.save();
+    card.context.clearRect(0, 0, outputWidth, outputHeight);
+    card.context.translate(outputWidth / 2, outputHeight / 2);
+    card.context.rotate(turns * Math.PI / 2);
     card.context.drawImage(source, index%cols*width, Math.floor(index/cols)*height+32,
-      width, height-32, 0, 0, width, height-32);
+      width, imageHeight, -width / 2, -imageHeight / 2, width, imageHeight);
+    card.context.restore();
   });
 }
 requestAnimationFrame(paintFrames);
@@ -321,6 +353,11 @@ async function update() {
         }
         if (Number.isInteger(saved?.columns) && saved.columns >= 0 && saved.columns <= 4) {
           columnPreference = saved.columns; columns.value = String(columnPreference);
+        }
+        if (saved?.rotations && typeof saved.rotations === 'object' && !Array.isArray(saved.rotations)) {
+          for (const [name, turns] of Object.entries(saved.rotations)) {
+            if (Number.isInteger(turns) && turns >= 0 && turns < 4) rotations.set(name, turns);
+          }
         }
       } catch (_) {}
     }

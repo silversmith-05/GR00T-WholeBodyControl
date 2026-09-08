@@ -550,6 +550,14 @@ the default order and automatic columns without changing the selected cameras.
 The browser remembers the order and column choice after refresh. Rearranging
 cards keeps the video connection running and applies in expanded view too.
 
+Use the rotate button at the right of each card's title to turn that image
+clockwise by 90 degrees per click (0, 90, 180, 270, then back to 0). The button
+shows the current angle. Each camera's rotation is saved in this browser for the
+camera source, including after hiding and showing the view or refreshing the page.
+Rotated images fit inside their cards without cropping, including in expanded
+view. Rotation affects only the browser preview and keeps recording and the
+video connection unchanged. **Reset layout** preserves these rotation angles.
+
 The preview fits the browser viewport without page scrolling. Selected views scale
 to the remaining space below the controls while preserving their aspect ratio, so
 the full image stays visible. Use **Expand view** to fill the webpage with the
