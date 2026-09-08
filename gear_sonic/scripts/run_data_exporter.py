@@ -23,6 +23,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 import json
+from pathlib import Path
 import time
 
 import numpy as np
@@ -30,6 +31,9 @@ from scipy.spatial.transform import Rotation as R
 import tyro
 import zmq
 
+from gear_sonic.utils.data_collection.inspire_hand import (
+    HAND_METADATA, CLOSE_ANGLES, hand_metadata, normalize_hand_metadata, snapshot_to_frame, validate_snapshot, validate_close_angles,
+)
 from gear_sonic.data.exporter import Gr00tDataExporter
 from gear_sonic.data.features_sonic_vla import (
     get_features_sonic_vla,
@@ -71,6 +75,11 @@ class SonicDataExporterConfig:
     data_collection_frequency: int = 50
     """Data collection frequency (Hz)."""
 
+
+    hand_backend: str = "dex3"
+    """dex3 (legacy seven-joint hands) or inspire (binary targets and measured scale feedback)."""
+    inspire_close_angles: tuple[int, int, int, int, int] = (250,250,250,250,300)
+    """Must match the controller's fixed five-finger close targets."""
 
     # Camera
     camera_host: str = "localhost"
@@ -227,12 +236,19 @@ class GrootDataCollector:
         sonic_data_zmq_port: int = 5556,
         state_zmq_host: str = "localhost",
         state_zmq_port: int = 5557,
+        hand_backend: str = "dex3",
+        inspire_close_angles: tuple = CLOSE_ANGLES,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
         self.loop_period = 1.0 / frequency
         self.data_exporter = data_exporter
         self.robot_model = robot_model
+        self.hand_backend = hand_backend
+        self.inspire_close_angles = validate_close_angles(inspire_close_angles)
+        self.latest_hand_msg = None
+        self._hand_episode_fault = False
+        self._hand_fault_counts = None
 
         self._episode_state = EpisodeState()
         self._keyboard_listener = ZMQKeyboardSubscriber()
@@ -267,6 +283,8 @@ class GrootDataCollector:
             self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "pose")
             self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "planner")
             self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "manager_state")
+            if self.hand_backend == "inspire":
+                self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "inspire_hand ")
             time.sleep(0.5)
             print(f"[Sonic] Connected to ZMQ at {sonic_data_zmq_host}:{sonic_data_zmq_port}")
             print("[Sonic] Subscribed to: pose, planner, manager_state")
@@ -303,6 +321,7 @@ class GrootDataCollector:
         if msg.get("ros_timestamp", 0.0) == 0.0:
             msg["ros_timestamp"] = time.time()
 
+        msg["workstation_receive_time"] = time.time()
         self.latest_proprio_msg = msg
 
     def _check_recording_commands(self):
@@ -320,6 +339,11 @@ class GrootDataCollector:
             self._episode_state.change_state()
             if self._episode_state.get_state() == self._episode_state.RECORDING:
                 self._initial_yaw = None
+                self._hand_episode_fault = False
+                self._hand_fault_counts = (
+                    [h["fault_count"] for h in self.latest_hand_msg["hands"]]
+                    if self.latest_hand_msg is not None else None
+                )
                 self._print_and_say(
                     f"Started recording {self.current_episode_index}", blocking=False
                 )
@@ -346,7 +370,22 @@ class GrootDataCollector:
             except zmq.Again:
                 break
 
-            if raw.startswith(b"manager_state"):
+            if raw.startswith(b"inspire_hand "):
+                try:
+                    data = json.loads(raw[len(b"inspire_hand "):])
+                    validate_snapshot(data)
+                    expected = getattr(self, "inspire_close_angles", CLOSE_ANGLES)
+                    if any(tuple(h["close_angles"]) != tuple(expected) for h in data["hands"]):
+                        raise ValueError("Controller five-finger targets differ from dataset configuration")
+                    self.latest_hand_msg = data
+                    if self._episode_state.get_state() == self._episode_state.RECORDING:
+                        self._check_hand_faults(data)
+                except (ValueError, KeyError, TypeError) as exc:
+                    self.latest_hand_msg = None
+                    if self._episode_state.get_state() == self._episode_state.RECORDING:
+                        self._hand_episode_fault = True
+                    print(f"[Inspire] Invalid feedback: {exc}")
+            elif raw.startswith(b"manager_state"):
                 self._handle_manager_state(raw)
             elif raw.startswith(b"planner"):
                 self._handle_planner_message(raw)
@@ -537,6 +576,23 @@ class GrootDataCollector:
                     )
                 frame_data[feature_name] = images[image_key]
 
+    def _check_hand_faults(self, snapshot):
+        counts = [h["fault_count"] for h in snapshot["hands"]]
+        frame = snapshot_to_frame(snapshot, frame_time=time.time(), frame_monotonic=time.monotonic())
+        fault = bool(frame["hand.episode_fault"][0])
+        if self._hand_fault_counts is not None and counts != self._hand_fault_counts:
+            fault = True
+        self._hand_fault_counts = counts
+        if fault and not self._hand_episode_fault:
+            print("[Inspire] Episode marked discarded: invalid hand input/feedback or write fault")
+        self._hand_episode_fault |= fault
+
+    def _save_episode(self):
+        if self.hand_backend == "inspire" and self._hand_episode_fault:
+            self.data_exporter.save_episode_as_discarded()
+        else:
+            self.data_exporter.save_episode()
+
     def _finalize_frame(self, t_start: float) -> bool:
         t_end = time.monotonic()
         if t_end - t_start > (1 / self.frequency):
@@ -545,7 +601,7 @@ class GrootDataCollector:
         if self._episode_state.get_state() == self._episode_state.NEED_TO_SAVE:
             buffer_size = self.data_exporter.episode_buffer.get("size", 0)
             if buffer_size > 0:
-                self.data_exporter.save_episode()
+                self._save_episode()
                 self.sonic_timing_monitor.reset()
                 self._initial_yaw = None
                 self._print_and_say("Finished saving episode")
@@ -576,16 +632,24 @@ class GrootDataCollector:
         assert self.latest_proprio_msg is not None
         proprio = self.latest_proprio_msg
 
-        whole_q = self.robot_model.get_configuration_from_actuated_joints(
-            body_actuated_joint_values=proprio["body_q"],
-            left_hand_actuated_joint_values=proprio["left_hand_q"],
-            right_hand_actuated_joint_values=proprio["right_hand_q"],
-        )
-        whole_action_wbc = self.robot_model.get_configuration_from_actuated_joints(
-            body_actuated_joint_values=proprio["last_action"],
-            left_hand_actuated_joint_values=proprio["last_left_hand_action"],
-            right_hand_actuated_joint_values=proprio["last_right_hand_action"],
-        )
+        if self.hand_backend == "inspire":
+            # Only body joints are used for wrist FK. Neutral model fingers are
+            # internal to FK and are never persisted as observations or actions.
+            whole_q = self.robot_model.get_configuration_from_actuated_joints(
+                body_actuated_joint_values=proprio["body_q"])
+            whole_action_wbc = self.robot_model.get_configuration_from_actuated_joints(
+                body_actuated_joint_values=proprio["last_action"])
+        else:
+            whole_q = self.robot_model.get_configuration_from_actuated_joints(
+                body_actuated_joint_values=proprio["body_q"],
+                left_hand_actuated_joint_values=proprio["left_hand_q"],
+                right_hand_actuated_joint_values=proprio["right_hand_q"],
+            )
+            whole_action_wbc = self.robot_model.get_configuration_from_actuated_joints(
+                body_actuated_joint_values=proprio["last_action"],
+                left_hand_actuated_joint_values=proprio["last_left_hand_action"],
+                right_hand_actuated_joint_values=proprio["last_right_hand_action"],
+            )
 
         self.robot_model.cache_forward_kinematics(whole_q)
         eef_parts = []
@@ -607,6 +671,24 @@ class GrootDataCollector:
         self._add_cpp_state_features(frame_data, proprio)
 
         sonic_latency_ms = self._add_sonic_pose_features(frame_data)
+
+        if self.hand_backend == "inspire":
+            body = self.robot_model.get_body_actuated_joint_indices()
+            frame_data["observation.state"] = whole_q[body]
+            frame_data["action.wbc"] = whole_action_wbc[body]
+            frame_data.pop("teleop.left_hand_joints", None)
+            frame_data.pop("teleop.right_hand_joints", None)
+            hand_frame = snapshot_to_frame(self.latest_hand_msg, frame_time=time.time(),
+                                           frame_monotonic=time.monotonic())
+            frame_data.update(hand_frame)
+            image_times = self.latest_image_msg.get("timestamps", {})
+            capture_times = [proprio.get("workstation_receive_time", -1.0)] + [
+                image_times.get(name, -1.0) for name in ("ego_view", "left_wrist", "right_wrist")
+            ]
+            frame_data["observation.capture_time"] = np.asarray(capture_times, dtype=np.float64)
+            frame_data["observation.capture_time_valid"] = np.asarray(
+                [np.isfinite(t) and t > 0 for t in capture_times], dtype=bool)
+            self._hand_episode_fault |= bool(hand_frame["hand.episode_fault"][0])
 
         self._add_images_to_frame_data(frame_data)
 
@@ -833,7 +915,7 @@ class GrootDataCollector:
             self._print_and_say("saving episode done", blocking=False)
             buffer_size = self.data_exporter.episode_buffer.get("size", 0)
             if buffer_size > 0:
-                self.data_exporter.save_episode()
+                self._save_episode()
             self._print_and_say(
                 f"Recording complete: {self.data_exporter.meta.root}", say=False, blocking=True
             )
@@ -908,11 +990,39 @@ class GrootDataCollector:
 # ---------------------------------------------------------------------------
 
 
+def validate_existing_dataset(root: Path, features: dict, backend: str, fps: int, expected_hand=None):
+    """Fail before connecting to sources when resuming an incompatible dataset."""
+    info_path = root / "meta/info.json"
+    if not info_path.exists():
+        return
+    info = json.loads(info_path.read_text())
+    previous_backend = info.get("script_config", {}).get("hand", {}).get("backend", "dex3")
+    if previous_backend != backend or info.get("fps") != fps:
+        raise ValueError("Existing dataset hand backend/FPS differs; choose a new --dataset-name")
+    if backend == "inspire":
+        expected_hand = normalize_hand_metadata(HAND_METADATA if expected_hand is None else expected_hand)
+        previous = normalize_hand_metadata(info.get("script_config", {}).get("hand", {}))
+        for key in ("schema_version", "preset_revision", "release", "close", "speed", "force", "thumb_rotation", "grasp"):
+            if previous.get(key) != expected_hand[key]:
+                raise ValueError("Existing dataset Inspire hand action schema/preset mapping differs; choose a new --dataset-name")
+    for key, expected in features.items():
+        actual = info.get("features", {}).get(key, {})
+        if (actual.get("dtype") != expected["dtype"]
+                or list(actual.get("shape", [])) != list(expected["shape"])
+                or actual.get("names") != expected.get("names")):
+            raise ValueError(f"Existing dataset feature {key} differs; choose a new --dataset-name")
+    expected_images = {key for key, value in features.items() if value["dtype"] in {"image", "video"}}
+    actual_images = {key for key, value in info["features"].items() if value["dtype"] in {"image", "video"}}
+    if actual_images != expected_images:
+        raise ValueError("Existing dataset camera configuration differs; choose a new --dataset-name")
+
+
 def main(config: SonicDataExporterConfig):
+    selected_hand = hand_metadata(config.inspire_close_angles) if config.hand_backend == "inspire" else {"backend":"dex3"}
     g1_rm = get_g1_robot_model()
 
-    dataset_features = get_features_sonic_vla(g1_rm)
-    modality_config = get_modality_config_sonic_vla(g1_rm)
+    dataset_features = get_features_sonic_vla(g1_rm, config.hand_backend)
+    modality_config = get_modality_config_sonic_vla(g1_rm, config.hand_backend)
 
     if config.record_wrist_cameras:
         print("[Camera] Wrist cameras enabled — adding to dataset schema")
@@ -924,11 +1034,17 @@ def main(config: SonicDataExporterConfig):
             else:
                 modality_config[key] = value
 
+    validate_existing_dataset(Path(config.root_output_dir) / config.dataset_name,
+                              dataset_features, config.hand_backend, config.data_collection_frequency, selected_hand)
+
     text_to_speech = TextToSpeech() if config.text_to_speech else None
 
     robot_config = poll_robot_config_zmq(
         config.state_zmq_host, config.state_zmq_port, config.robot_config_timeout
     )
+
+    if config.hand_backend == "inspire" and robot_config.get("dex3_hands_enabled") is not False:
+        raise ValueError("Inspire requires rebuilt C++ deploy with --disable-dex3-hands")
 
     data_exporter = Gr00tDataExporter.create(
         save_root=f"{config.root_output_dir}/{config.dataset_name}",
@@ -936,7 +1052,8 @@ def main(config: SonicDataExporterConfig):
         features=dataset_features,
         modality_config=modality_config,
         task=config.task_prompt,
-        script_config={**robot_config, "record_wrist_cameras": config.record_wrist_cameras},
+        script_config={**robot_config, "record_wrist_cameras": config.record_wrist_cameras,
+                       "hand": selected_hand},
     )
 
     data_collector = GrootDataCollector(
@@ -950,6 +1067,8 @@ def main(config: SonicDataExporterConfig):
         sonic_data_zmq_port=config.sonic_zmq_port,
         state_zmq_host=config.state_zmq_host,
         state_zmq_port=config.state_zmq_port,
+        hand_backend=config.hand_backend,
+        inspire_close_angles=config.inspire_close_angles,
     )
     data_collector.run()
 

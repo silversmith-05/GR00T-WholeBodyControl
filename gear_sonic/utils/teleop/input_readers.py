@@ -470,6 +470,7 @@ class IsaacTeleopReader:
 
             sample = {
                 "body_poses_np": body_poses,
+                "controller_data": controller,
                 "timestamp_realtime": time.time(),
                 "timestamp_monotonic": time.monotonic(),
                 "timestamp_ns": stamp_ns,

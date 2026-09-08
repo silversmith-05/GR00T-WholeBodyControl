@@ -42,14 +42,14 @@ def _get_joint_group_slices(robot_model: RobotModel) -> dict[str, dict[str, int]
     return slices
 
 
-def get_modality_config_sonic_vla(robot_model: RobotModel) -> dict:
+def get_modality_config_sonic_vla(robot_model: RobotModel, hand_backend: str = "dex3") -> dict:
     """Return the modality config for the Sonic VLA dataset.
 
     Produces the exact content of meta/modality.json.
     """
     group_slices = _get_joint_group_slices(robot_model)
 
-    return {
+    config = {
         "state": {
             **group_slices,
             "left_wrist_pos": {
@@ -201,8 +201,24 @@ def get_modality_config_sonic_vla(robot_model: RobotModel) -> dict:
         },
     }
 
+    if hand_backend == "inspire":
+        body = robot_model.get_body_actuated_joint_indices()
+        for group in _JOINT_GROUPS_FOR_STATE:
+            config["state"].pop(group)
+            if group in {"left_hand", "right_hand"}:
+                continue
+            indices = sorted(body.index(i) for i in robot_model.get_joint_group_indices(group))
+            config["state"][group] = {"start": indices[0], "end": indices[-1] + 1}
+        config["action"].pop("left_hand_joints")
+        config["action"].pop("right_hand_joints")
+        config["action"]["hand"] = {"start": 0, "end": 2, "original_key": "action.hand"}
+        config["action"]["thumb_rotation"] = {"start": 0, "end": 2, "original_key": "action.thumb_rotation"}
+    elif hand_backend != "dex3":
+        raise ValueError("Unknown hand backend")
+    return config
 
-def get_features_sonic_vla(robot_model: RobotModel) -> dict:
+
+def get_features_sonic_vla(robot_model: RobotModel, hand_backend: str = "dex3") -> dict:
     """Return the dataset features for the Sonic VLA dataset.
 
     The returned dict populates the "features" key of meta/info.json.
@@ -210,7 +226,7 @@ def get_features_sonic_vla(robot_model: RobotModel) -> dict:
     joint_names = robot_model.joint_names
     num_joints = robot_model.num_joints
 
-    return {
+    features = {
         "observation.images.ego_view": {
             "dtype": "video",
             "shape": [EGO_VIEW_HEIGHT, EGO_VIEW_WIDTH, 3],
@@ -367,6 +383,23 @@ def get_features_sonic_vla(robot_model: RobotModel) -> dict:
             ],
         },
     }
+
+    if hand_backend == "inspire":
+        from gear_sonic.utils.data_collection.inspire_hand import hand_features
+        body = robot_model.get_body_actuated_joint_indices()
+        for key in ("observation.state", "action.wbc"):
+            features[key] = {"dtype": "float64", "shape": (len(body),),
+                             "names": [joint_names[i] for i in body]}
+        features.pop("teleop.left_hand_joints")
+        features.pop("teleop.right_hand_joints")
+        features.update(hand_features())
+        for key, dtype in (("observation.capture_time", "float64"),
+                           ("observation.capture_time_valid", "bool")):
+            features[key] = {"dtype": dtype, "shape": (4,),
+                             "names": ["body_received", "ego_view", "left_wrist", "right_wrist"]}
+    elif hand_backend != "dex3":
+        raise ValueError("Unknown hand backend")
+    return features
 
 
 def get_wrist_camera_features() -> dict:

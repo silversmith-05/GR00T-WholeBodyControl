@@ -440,6 +440,7 @@ def hf_transform_to_torch_by_features(
                 "float64": torch.float64,
                 "int32": torch.int32,
                 "int64": torch.int64,
+                "bool": torch.bool,
             }
             items_dict[key] = [
                 torch.tensor(x, dtype=dtype_mapping[dtype_str]) for x in items_dict[key]
@@ -459,6 +460,24 @@ class TypedLeRobotDataset(LeRobotDataset):
                 self.meta.features.pop(key)
 
     def load_hf_dataset(self) -> datasets.Dataset:
+        if self.meta.info.get("script_config", {}).get("hand", {}).get("backend") == "inspire":
+            from gear_sonic.utils.data_collection.inspire_hand import HAND_METADATA, normalize_hand_metadata, validate_close_angles
+            recorded = normalize_hand_metadata(self.meta.info["script_config"]["hand"])
+            for key in ("schema_version", "preset_revision", "release", "thumb_rotation", "grasp", "speed", "force"):
+                if recorded.get(key) != HAND_METADATA[key]:
+                    raise ValueError("Inspire dataset uses an older/different hand action schema or open-close mapping; "
+                                     "review its binary and thumb rotation actions before training")
+            if len(recorded.get("close", [])) != 6 or recorded["close"][5] != 339:
+                raise ValueError("Invalid Inspire five-finger close template")
+            validate_close_angles(recorded["close"][:5])
+            discarded = set(self.meta.info.get("discarded_episode_indices", []))
+            selected = range(self.meta.total_episodes) if self.episodes is None else self.episodes
+            self.episodes = [episode for episode in selected if episode not in discarded]
+            if not self.episodes:
+                raise ValueError("No usable Inspire episodes: all selected episodes are discarded")
+            if self.meta.episodes_stats:
+                from lerobot.common.datasets.compute_stats import aggregate_stats
+                self.stats = aggregate_stats([self.meta.episodes_stats[i] for i in self.episodes])
         if self.episodes is None:
             path = str(self.root / "data")
             hf_dataset = load_dataset("parquet", data_dir=path, split="train")

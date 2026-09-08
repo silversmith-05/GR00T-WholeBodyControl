@@ -18,6 +18,8 @@ Starts the full data collection stack in a single tmux session:
     │ (.venv_sim)                                     │
     └─────────────────────────────────────────────────┘
 
+    Window camera_web — HTTP MJPEG browser preview (http://localhost:8080).
+
 Prerequisites:
     - tmux installed (sudo apt install tmux)
     - Virtual environments set up:
@@ -30,13 +32,16 @@ Usage (from repo root — no venv activation needed):
     python gear_sonic/scripts/launch_data_collection.py                          # real robot (default)
     python gear_sonic/scripts/launch_data_collection.py --sim                    # MuJoCo sim
     python gear_sonic/scripts/launch_data_collection.py --no-camera-viewer       # skip viewer
+    python gear_sonic/scripts/launch_data_collection.py --no-camera-web          # skip browser relay
     python gear_sonic/scripts/launch_data_collection.py --pico-input-source isaac-teleop  # in-process CloudXR / DeviceIO
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import ipaddress
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -113,6 +118,30 @@ class DataCollectionLaunchConfig:
     deploy_output_type: str = ""
     """Output type for deploy.sh. Leave empty for default."""
 
+    hand_backend: str = "dex3"
+    """Hand backend: dex3 (legacy) or inspire (RH56E2-T1)."""
+
+    enable_hand_control: bool = False
+    """Explicitly permit Inspire writes after trigger arming. Default is read-only."""
+
+    inspire_left_ip: str = "192.168.123.211"
+    inspire_right_ip: str = "192.168.123.210"
+    inspire_port: int = 6000
+    inspire_left_thumb_step: int = 10
+    """Left thumb rotation scale units per X/Y click (not degrees)."""
+    inspire_right_thumb_step: int = 10
+    """Right thumb rotation scale units per A/B click (not degrees)."""
+    inspire_left_thumb_hold_rate: float = 50.0
+    inspire_right_thumb_hold_rate: float = 50.0
+    """Held-key rotation target rate, 1..50 device scale units per second."""
+    inspire_close_angles: tuple[int, int, int, int, int] = (250, 250, 250, 250, 300)
+    """Fixed closed bend targets: little, ring, middle, index, thumb bend. Calibrate on the object."""
+    inspire_left_thumb_min: int = 0
+    inspire_left_thumb_max: int = 1000
+    inspire_right_thumb_min: int = 0
+    inspire_right_thumb_max: int = 1000
+    """Software bounds; defaults are protocol bounds, not calibrated grasp limits."""
+
     # Teleop streamer options
     pico_manager: bool = True
     """Run pico_manager_thread_server with --manager flag."""
@@ -150,10 +179,19 @@ class DataCollectionLaunchConfig:
     """Start the camera viewer pane."""
 
     camera_host: str = "localhost"
-    """Camera server host (shared by data exporter and viewer)."""
+    """Camera server host (shared by data exporter, viewer and browser relay)."""
 
     camera_port: int = 5555
-    """Camera server port (shared by data exporter and viewer)."""
+    """Camera server port (shared by data exporter, viewer and browser relay)."""
+
+    camera_web: bool = True
+    """Start the browser preview relay in a separate camera_web tmux window."""
+
+    camera_web_host: str = "127.0.0.1"
+    """HTTP bind address. Use 0.0.0.0 to allow access from other computers."""
+
+    camera_web_port: int = 8080
+    """HTTP port for browser preview on this workstation."""
 
 
 SESSION_NAME = "sonic_data_collection"
@@ -162,6 +200,9 @@ SESSION_NAME = "sonic_data_collection"
 def _check_prerequisites(config: DataCollectionLaunchConfig):
     """Verify that required tools and venvs exist."""
     errors = []
+
+    if config.camera_web and not 1 <= config.camera_web_port <= 65535:
+        errors.append("--camera-web-port must be in 1..65535")
 
     if not shutil.which("tmux"):
         errors.append("tmux is not installed. Install with: sudo apt install tmux")
@@ -194,6 +235,38 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
 
     if config.pico_input_source not in {"xrt", "isaac-teleop"}:
         errors.append("--pico-input-source must be one of: xrt, isaac-teleop")
+
+    if config.hand_backend not in {"dex3", "inspire"}:
+        errors.append("--hand-backend must be dex3 or inspire")
+    if config.enable_hand_control and config.hand_backend != "inspire":
+        errors.append("--enable-hand-control requires --hand-backend inspire")
+    if config.hand_backend == "inspire":
+        try:
+            hand_launch_arguments(config)  # Validate thumb settings before touching tmux.
+        except ValueError as exc:
+            errors.append(str(exc))
+        if not config.pico_manager:
+            errors.append("Inspire requires --pico-manager")
+        if config.sim:
+            errors.append("Inspire hardware backend cannot be used with --sim; use the offline tests")
+        try:
+            ipaddress.IPv4Address(config.inspire_left_ip)
+            ipaddress.IPv4Address(config.inspire_right_ip)
+            if not 1 <= config.inspire_port <= 65535:
+                raise ValueError("port must be 1..65535")
+        except ValueError as exc:
+            errors.append(f"Invalid Inspire endpoint: {exc}")
+        if config.inspire_left_ip == config.inspire_right_ip:
+            errors.append("Inspire left and right IP addresses must differ")
+        check = subprocess.run(
+            [str(repo_root / ".venv_teleop/bin/python"), "-c",
+             "from inspire_rh56e2 import HandClient, HandConfig; "
+             "from importlib.metadata import version; "
+             "assert version(\"inspire-rh56e2\") == \"0.3.0\""],
+            capture_output=True, text=True,
+        )
+        if check.returncode:
+            errors.append("Install inspire-rh56e2==0.3.0 into the existing .venv_teleop: " + check.stderr)
 
     if errors:
         print("ERROR: Prerequisites not met:\n")
@@ -279,10 +352,52 @@ def _check_pane_alive(pane_index: int) -> bool:
     return result.stdout.strip() != "1"
 
 
+def hand_launch_arguments(config: DataCollectionLaunchConfig):
+    """Pure argument builder, also exercised without running the launcher."""
+    teleop = ["--hand-backend", config.hand_backend]
+    exporter = ["--hand-backend", config.hand_backend]
+    deploy = []
+    if config.hand_backend == "inspire":
+        from gear_sonic.utils.teleop.inspire_hand_controller import ThumbRotationConfig, validate_close_angles
+        close_angles = validate_close_angles(config.inspire_close_angles)
+        grasp_args = ["--inspire-close-angles", *map(str, close_angles)]
+        teleop += grasp_args
+        exporter += grasp_args
+        for side in ("left", "right"):
+            ThumbRotationConfig(*(getattr(config, f"inspire_{side}_thumb_{key}")
+                                  for key in ("step", "min", "max", "hold_rate")))
+            for key in ("step", "min", "max", "hold_rate"):
+                teleop += [f"--inspire-{side}-thumb-{key.replace('_', '-')}",
+                           str(getattr(config, f"inspire_{side}_thumb_{key}"))]
+        deploy = ["--disable-dex3-hands"]
+        teleop += ["--inspire-left-ip", config.inspire_left_ip,
+                   "--inspire-right-ip", config.inspire_right_ip,
+                   "--inspire-port", str(config.inspire_port)]
+        if config.enable_hand_control:
+            teleop.append("--enable-hand-control")
+    return deploy, teleop, exporter
+
+
+def _start_camera_web(config: DataCollectionLaunchConfig, repo_root: Path):
+    """Run the standalone relay as a foreground tmux process, scoped to the session."""
+    command = [
+        str(repo_root / ".venv_data_collection/bin/python"), "-u",
+        str(repo_root / "gear_sonic/scripts/run_camera_web.py"),
+        "--camera-host", config.camera_host, "--camera-port", str(config.camera_port),
+        "--host", config.camera_web_host, "--port", str(config.camera_web_port),
+    ]
+    subprocess.run(
+        ["tmux", "new-window", "-d", "-t", SESSION_NAME, "-n", "camera_web",
+         "-c", str(repo_root), "exec " + shlex.join(command)],
+        check=True,
+    )
+
+
 def main(config: DataCollectionLaunchConfig):
     repo_root = Path(__file__).resolve().parent.parent.parent
 
     _check_prerequisites(config)
+    hand_deploy_args, hand_teleop_args, hand_exporter_args = hand_launch_arguments(config)
     _kill_existing_session()
 
     print("=" * 60)
@@ -292,12 +407,16 @@ def main(config: DataCollectionLaunchConfig):
     print(f"  Task prompt:     {config.task_prompt}")
     print(f"  Dataset name:    {config.dataset_name or '(auto)'}")
     print(f"  Deploy input:    {config.deploy_input_type}")
+    print(f"  Hand backend:    {config.hand_backend}; Inspire writes={config.enable_hand_control}")
     print(f"  Teleop input:    {config.pico_input_source}")
     if config.deploy_checkpoint:
         print(f"  Checkpoint:      {config.deploy_checkpoint}")
     print(f"  Camera:          {config.camera_host}:{config.camera_port}")
     print(f"  DC frequency:    {config.data_exporter_frequency} Hz")
     print(f"  Camera viewer:   {'Yes' if config.camera_viewer else 'No'}")
+    web_host = "localhost" if config.camera_web_host == "0.0.0.0" else config.camera_web_host
+    web_url = f"http://{web_host}:{config.camera_web_port}"
+    print(f"  Camera web:      {web_url if config.camera_web else 'Disabled'}")
     print(f"  Wrist cameras:   {'Yes' if config.record_wrist_cameras else 'No'}")
     print(f"  Text-to-speech:  {'Yes' if config.text_to_speech else 'No'}")
     print(f"  PC IP (for PICO): {_get_local_ip()}")
@@ -331,6 +450,10 @@ def main(config: DataCollectionLaunchConfig):
             ["tmux", "select-window", "-t", f"{SESSION_NAME}:data_collection"],
         )
 
+    if config.camera_web:
+        _start_camera_web(config, repo_root)
+        print("Starting browser preview relay (window: camera_web)...")
+
     # --- Pane 0 (top-left): C++ Deploy ---
     deploy_mode = "sim" if config.sim else "real"
     deploy_cmd = (
@@ -349,7 +472,7 @@ def main(config: DataCollectionLaunchConfig):
         deploy_cmd += f"--motion-data {config.deploy_motion_data} "
     if config.deploy_output_type:
         deploy_cmd += f"--output-type {config.deploy_output_type} "
-    deploy_cmd += deploy_mode
+    deploy_cmd += shlex.join(hand_deploy_args) + " " + deploy_mode
 
     print("Starting C++ deploy (pane 0)...")
     _send_to_pane(0, deploy_cmd, wait=3.0)
@@ -364,6 +487,7 @@ def main(config: DataCollectionLaunchConfig):
         f"python gear_sonic/scripts/pico_manager_thread_server.py "
         f"--input-source {config.pico_input_source}"
     )
+    pico_cmd += " " + shlex.join(hand_teleop_args)
     if config.pico_manager:
         pico_cmd += " --manager"
     if config.pico_vis_vr3pt:
@@ -398,6 +522,7 @@ def main(config: DataCollectionLaunchConfig):
         f"--camera-host {config.camera_host} "
         f"--camera-port {config.camera_port}"
     )
+    exporter_cmd += " " + shlex.join(hand_exporter_args)
     if config.dataset_name:
         exporter_cmd += f" --dataset-name '{config.dataset_name}'"
     if config.record_wrist_cameras:
@@ -419,6 +544,12 @@ def main(config: DataCollectionLaunchConfig):
     print()
     print(f"  tmux session: {SESSION_NAME}")
     print()
+    if config.camera_web:
+        print(f"  Window 'camera_web': {web_url}")
+        if config.camera_web_host == "0.0.0.0":
+            print(f"    LAN access: http://<this PC's IP>:{config.camera_web_port}")
+        print("    Detaching keeps preview running; killing this session stops it.")
+        print()
     if config.sim:
         print("  Window 'sim':")
         print("    MuJoCo Simulator (.venv_sim)")
@@ -435,7 +566,7 @@ def main(config: DataCollectionLaunchConfig):
     print()
     print("  Controls:")
     print("    Ctrl+b, arrow keys  - Switch between panes")
-    if config.sim:
+    if config.sim or config.camera_web:
         print("    Ctrl+b, n / p       - Next / previous window")
     print("    Ctrl+b, d           - Detach from session")
     print("    Ctrl+\\              - Kill entire session")

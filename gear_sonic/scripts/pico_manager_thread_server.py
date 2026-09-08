@@ -25,6 +25,8 @@
 from collections import defaultdict, deque
 from enum import Enum, IntEnum
 import os
+import json
+import signal
 import subprocess
 import threading
 import time
@@ -727,12 +729,13 @@ def get_face_buttons(reader=None):
         return False, False
 
 
-def get_abxy_buttons(reader=None):
+def get_abxy_buttons(reader=None, *, strict=False):
     """Fetch A,B,X,Y face buttons as booleans (a,b,x,y)."""
+    missing = None if strict else (False, False, False, False)
     if isinstance(reader, _ISAAC_TELEOP_READERS):
         ctrl = reader.get_controller_data()
         if ctrl is None:
-            return False, False, False, False
+            return missing
         return (
             float(ctrl.get("right_primary_click", 0.0)) > 0.5,
             float(ctrl.get("right_secondary_click", 0.0)) > 0.5,
@@ -740,7 +743,7 @@ def get_abxy_buttons(reader=None):
             float(ctrl.get("left_secondary_click", 0.0)) > 0.5,
         )
     if xrt is None:
-        return False, False, False, False
+        return missing
     try:
         a_pressed = bool(xrt.get_A_button())
         b_pressed = bool(xrt.get_B_button())
@@ -748,7 +751,7 @@ def get_abxy_buttons(reader=None):
         y_pressed = bool(xrt.get_Y_button())
         return a_pressed, b_pressed, x_pressed, y_pressed
     except Exception:
-        return False, False, False, False
+        return missing
 
 
 def compute_hand_joints_from_inputs(
@@ -1249,6 +1252,7 @@ class PoseStreamer:
         record_dir: str,
         record_format: str,
         log_prefix: str = "PoseLoop",
+        hand_backend: str = "dex3",
     ):
         self.socket = socket
         self.reader = reader
@@ -1269,7 +1273,10 @@ class PoseStreamer:
             os.makedirs(record_dir, exist_ok=True)
         self.record_idx = 0
 
-        self.left_hand_ik_solver, self.right_hand_ik_solver = init_hand_ik_solvers()
+        self.hand_backend = hand_backend
+        self.left_hand_ik_solver, self.right_hand_ik_solver = (
+            init_hand_ik_solvers() if hand_backend == "dex3" else (None, None)
+        )
         self.parent_indices = [
             -1,
             0,
@@ -1538,6 +1545,9 @@ class PoseStreamer:
                 ),
             }
 
+            if self.hand_backend == "inspire":
+                numpy_data.pop("left_hand_joints")
+                numpy_data.pop("right_hand_joints")
             packed_message = pack_pose_message(numpy_data, topic="pose")
             self.socket.send(packed_message)
 
@@ -1722,6 +1732,7 @@ class PlannerStreamer:
         poll_hz: int = 20,
         zmq_feedback_host: str = "localhost",
         zmq_feedback_port: int = 5557,
+        hand_backend: str = "dex3",
     ):
         self.socket = socket
         self.reader = reader
@@ -1741,7 +1752,10 @@ class PlannerStreamer:
         self.last_xrt_timestamp = None
 
         # Hand IK solvers for trigger-controlled hand open/close in VR 3PT mode
-        self.left_hand_ik_solver, self.right_hand_ik_solver = init_hand_ik_solvers()
+        self.hand_backend = hand_backend
+        self.left_hand_ik_solver, self.right_hand_ik_solver = (
+            init_hand_ik_solvers() if hand_backend == "dex3" else (None, None)
+        )
 
     def reset_yaw(self):
         """Called when entering planner mode. Resets state for fresh start."""
@@ -1875,8 +1889,8 @@ class PlannerStreamer:
                 speed=speed,
                 height=-1.0,
                 upper_body_position=upper_body_position,
-                left_hand_position=left_hand_position,
-                right_hand_position=right_hand_position,
+                left_hand_position=left_hand_position if self.hand_backend == "dex3" else None,
+                right_hand_position=right_hand_position if self.hand_backend == "dex3" else None,
                 vr_3pt_position=vr_3pt_position,
                 vr_3pt_orientation=vr_3pt_orientation,
                 vr_3pt_compliance=vr_3pt_compliance,
@@ -1912,6 +1926,20 @@ def run_pico_manager(
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
     input_source: str = "xrt",
+    hand_backend: str = "dex3",
+    enable_hand_control: bool = False,
+    inspire_left_ip: str = "192.168.123.211",
+    inspire_right_ip: str = "192.168.123.210",
+    inspire_port: int = 6000,
+    inspire_left_thumb_step: int = 10,
+    inspire_right_thumb_step: int = 10,
+    inspire_left_thumb_min: int = 0,
+    inspire_left_thumb_max: int = 1000,
+    inspire_right_thumb_min: int = 0,
+    inspire_right_thumb_max: int = 1000,
+    inspire_left_thumb_hold_rate: float = 50.0,
+    inspire_right_thumb_hold_rate: float = 50.0,
+    inspire_close_angles: tuple = (250, 250, 250, 250, 300),
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
@@ -1919,6 +1947,17 @@ def run_pico_manager(
       A+X: Toggle between planner and pose mode
       A+B+X+Y: Toggle policy start/stop
     """
+    if hand_backend not in {"dex3", "inspire"}:
+        raise ValueError("Unknown hand backend")
+    if enable_hand_control and hand_backend != "inspire":
+        raise ValueError("--enable-hand-control requires --hand-backend inspire")
+    if hand_backend == "inspire":
+        from gear_sonic.utils.teleop.inspire_hand_controller import ThumbRotationConfig, validate_close_angles
+        inspire_close_angles = validate_close_angles(inspire_close_angles)
+        left_thumb = ThumbRotationConfig(inspire_left_thumb_step, inspire_left_thumb_min,
+                                        inspire_left_thumb_max, inspire_left_thumb_hold_rate)
+        right_thumb = ThumbRotationConfig(inspire_right_thumb_step, inspire_right_thumb_min,
+                                         inspire_right_thumb_max, inspire_right_thumb_hold_rate)
     reader = _init_input_source(input_source, buffer_size)
 
     context = zmq.Context()
@@ -1953,6 +1992,7 @@ def run_pico_manager(
         record_dir=record_dir,
         record_format=record_format,
         log_prefix="PoseLoop",
+        hand_backend=hand_backend,
     )
     planner_streamer = PlannerStreamer(
         socket=socket,
@@ -1961,6 +2001,7 @@ def run_pico_manager(
         poll_hz=20,
         zmq_feedback_host=zmq_feedback_host,
         zmq_feedback_port=zmq_feedback_port,
+        hand_backend=hand_backend,
     )
 
     # State machine diagram:
@@ -1985,16 +2026,46 @@ def run_pico_manager(
     vr3pt_parent_mode = StreamMode.PLANNER
     prev_toggle_dc = False
     prev_toggle_da = False
+    hands = None
+    previous_signals = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    def stop_on_sigterm(*_):
+        raise KeyboardInterrupt
+    for sig in previous_signals:
+        signal.signal(sig, stop_on_sigterm)
     try:
+        if hand_backend == "inspire":
+            from gear_sonic.utils.teleop.inspire_hand_controller import (
+                InspireHandController, PicoHandBridge,
+            )
+            hands = InspireHandController(inspire_left_ip, inspire_right_ip,
+                                          port=inspire_port, enabled=enable_hand_control,
+                                          left_thumb=left_thumb, right_thumb=right_thumb,
+                                          close_angles=inspire_close_angles)
+            hands.start()
+            print(f"[Inspire] RH56E2-T1: left={inspire_left_ip}:{inspire_port}, "
+                  f"right={inspire_right_ip}:{inspire_port}; control={enable_hand_control}")
+            print("[Inspire] 0=release [1000,1000,1000,1000,1000,theta]; "
+                  f"1=five-finger close {list(inspire_close_angles)} + theta; each hand keeps its own theta")
+            print(f"[Inspire] Single-click on release: X/Y=left -/+{left_thumb.step} "
+                  f"[{left_thumb.minimum},{left_thumb.maximum}], A/B=right -/+{right_thumb.step} "
+                  f"[{right_thumb.minimum},{right_thumb.maximum}]. Chords/grip suppress thumb clicks.")
+            print(f"[Inspire] Hold ONE key for 0.6 s: left {left_thumb.hold_rate}, "
+                  f"right {right_thumb.hold_rate} scale units/s (not degrees/s). "
+                  "Release/chord stops new steps; already transmitted steps cannot be recalled.")
+            print("[Inspire] POSE / PLANNER_VR_3PT only. Release triggers, then press again "
+                  "after startup, mode change or reconnect. No automatic open/close.")
+            hand_bridge = PicoHandBridge(hands)
+        last_hand_publish = 0.0
         prev_ax_pressed = False
         prev_by_pressed = False
         prev_start_combo = False
         prev_left_axis_click = False
         while True:
             # Poll Pico controller for buttons/axes
-            a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons(reader)
+            hand_buttons = get_abxy_buttons(reader, strict=hands is not None)
+            a_pressed, b_pressed, x_pressed, y_pressed = hand_buttons or (False, False, False, False)
 
-            left_menu_button, _, _, left_grip_mgr, _ = get_controller_inputs(reader)
+            left_menu_button, left_trigger_mgr, right_trigger_mgr, left_grip_mgr, _ = get_controller_inputs(reader)
 
             left_axis_click, _ = get_axis_clicks(reader)
 
@@ -2066,6 +2137,15 @@ def run_pico_manager(
                     new_mode = StreamMode.POSE
                 elif by_pressed and not prev_by_pressed:
                     new_mode = StreamMode.POSE
+
+            # Cancel/submit before potentially expensive body mode transitions.
+            if hands is not None:
+                hand_bridge.update(reader, left_trigger_mgr, right_trigger_mgr, new_mode.value,
+                                   buttons=hand_buttons, left_grip=left_grip_mgr)
+                if time.monotonic() - last_hand_publish >= 0.02:
+                    socket.send(b"inspire_hand " + json.dumps(hands.snapshot(), allow_nan=False).encode(),
+                                flags=zmq.NOBLOCK)
+                    last_hand_publish = time.monotonic()
 
             # Handle mode transitions before running loop
             if new_mode != current_mode:
@@ -2149,7 +2229,12 @@ def run_pico_manager(
     except KeyboardInterrupt:
         print("\nStopping manager...")
     finally:
-        # Cleanup resources
+        # Cancel before waiting for any other resource. SIGTERM follows this path too.
+        if hands is not None:
+            hands.close()
+            socket.send(b"inspire_hand " + json.dumps(hands.snapshot()).encode(), flags=zmq.NOBLOCK)
+        for sig, handler in previous_signals.items():
+            signal.signal(sig, handler)
         reader.stop()
         three_point.close()
         socket.close()
@@ -2251,7 +2336,25 @@ if __name__ == "__main__":
             "'isaac-teleop' for in-process IsaacTeleop / CloudXR DeviceIO"
         ),
     )
+    parser.add_argument("--hand-backend", choices=["dex3", "inspire"], default="dex3")
+    parser.add_argument("--enable-hand-control", action="store_true")
+    parser.add_argument("--inspire-left-ip", default="192.168.123.211")
+    parser.add_argument("--inspire-right-ip", default="192.168.123.210")
+    parser.add_argument("--inspire-port", type=int, default=6000)
+    for side in ("left", "right"):
+        parser.add_argument(f"--inspire-{side}-thumb-step", type=int, default=10,
+                            help="Rotation scale units per single click; not degrees")
+        parser.add_argument(f"--inspire-{side}-thumb-min", type=int, default=0)
+        parser.add_argument(f"--inspire-{side}-thumb-max", type=int, default=1000)
+        parser.add_argument(f"--inspire-{side}-thumb-hold-rate", type=float, default=50.0,
+                            help="Held-key target rate, 1..50 device scale units/s")
+    parser.add_argument("--inspire-close-angles", type=int, nargs=5, default=(250,250,250,250,300),
+                        metavar=("LITTLE", "RING", "MIDDLE", "INDEX", "THUMB_BEND"))
     args = parser.parse_args()
+    if args.hand_backend == "inspire" and not args.manager:
+        parser.error("Inspire requires --manager for mode and lifecycle protection")
+    if args.enable_hand_control and args.hand_backend != "inspire":
+        parser.error("--enable-hand-control requires --hand-backend inspire")
 
     # Standalone VR3Pt test modes (exit after finishing)
     if args.vr3pt_test:
@@ -2292,6 +2395,20 @@ if __name__ == "__main__":
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
             input_source=args.input_source,
+            hand_backend=args.hand_backend,
+            enable_hand_control=args.enable_hand_control,
+            inspire_left_ip=args.inspire_left_ip,
+            inspire_right_ip=args.inspire_right_ip,
+            inspire_port=args.inspire_port,
+            inspire_left_thumb_step=args.inspire_left_thumb_step,
+            inspire_right_thumb_step=args.inspire_right_thumb_step,
+            inspire_left_thumb_min=args.inspire_left_thumb_min,
+            inspire_left_thumb_max=args.inspire_left_thumb_max,
+            inspire_right_thumb_min=args.inspire_right_thumb_min,
+            inspire_right_thumb_max=args.inspire_right_thumb_max,
+            inspire_left_thumb_hold_rate=args.inspire_left_thumb_hold_rate,
+            inspire_right_thumb_hold_rate=args.inspire_right_thumb_hold_rate,
+            inspire_close_angles=args.inspire_close_angles,
         )
     else:
         # Run legacy single-thread pose streaming

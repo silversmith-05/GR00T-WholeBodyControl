@@ -280,6 +280,7 @@ class G1Deploy {
     
     // Dex3 hands manager
     Dex3Hands dex3_hands_;
+    bool enable_dex3_hands_ = true;
 
     // Motor error monitor (tracks fault state transitions)
     ErrorMonitor error_monitor_;
@@ -2159,7 +2160,8 @@ class G1Deploy {
       std::string zmq_out_topic = "g1_debug",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
-      double initial_max_close_ratio = 1.0)
+      double initial_max_close_ratio = 1.0,
+      bool enable_dex3_hands = true)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2185,7 +2187,9 @@ class G1Deploy {
       ChannelFactory::Instance()->Init(0, networkInterface);
 
       // Initialize Dex3 hands (ChannelFactory already initialized above)
-      dex3_hands_.initialize("");
+      enable_dex3_hands_ = enable_dex3_hands;
+      if (enable_dex3_hands_) dex3_hands_.initialize("");
+      else std::cout << "[INFO] Dex3 disabled: Python owns external hands" << std::endl;
 
       audio_thread_ = std::make_unique<AudioThread>();
 
@@ -2432,6 +2436,7 @@ class G1Deploy {
       robot_config["control_frequency"] = 1.0 / control_dt_;
       robot_config["planner_frequency"] = 1.0 / planner_dt_;
       robot_config["is_using_encoder"] = is_using_encoder_;
+      robot_config["dex3_hands_enabled"] = enable_dex3_hands_;
       robot_config["policy_fp16"] = policy_fp16;
       robot_config["planner_fp16"] = planner_fp16;
 
@@ -2518,7 +2523,7 @@ class G1Deploy {
         input_interface_->SetVR3PointCompliance(initial_vr_3point_compliance_);
         // Set initial max close ratio for hands (keyboard-controlled: X/C keys)
         input_interface_->SetMaxCloseRatio(initial_max_close_ratio_);
-        dex3_hands_.SetMaxCloseRatio(initial_max_close_ratio_);
+        if (enable_dex3_hands_) dex3_hands_.SetMaxCloseRatio(initial_max_close_ratio_);
         std::cout << "[INFO] Initial VR 3-point compliance: ["
                   << initial_vr_3point_compliance_[0] << ", "
                   << initial_vr_3point_compliance_[1] << ", "
@@ -2679,7 +2684,7 @@ class G1Deploy {
       }
 
       // Publish Dex3 hand commands at the same publish cadence
-      dex3_hands_.writeOnce();
+      if (enable_dex3_hands_) dex3_hands_.writeOnce();
     }
 
     /// Gracefully stop all threads and send a damping-only command.
@@ -2748,12 +2753,12 @@ class G1Deploy {
           motor_command_tmp.q_target.at(i) =
               static_cast<float>(current_pos * (1.0 - ratio) + default_angles[i] * ratio);
         }
-        dex3_hands_.close(true);
-        dex3_hands_.close(false);
+        if (enable_dex3_hands_) dex3_hands_.close(true);
+        if (enable_dex3_hands_) dex3_hands_.close(false);
       } else {
         program_state_ = ProgramState::WAIT_FOR_CONTROL;
-        dex3_hands_.open(true);
-        dex3_hands_.open(false);
+        if (enable_dex3_hands_) dex3_hands_.open(true);
+        if (enable_dex3_hands_) dex3_hands_.open(false);
         std::cout << "Init Done" << std::endl;
       }
       motor_command_buffer_.SetData(motor_command_tmp);
@@ -2906,7 +2911,7 @@ class G1Deploy {
       std::array<double, 7> right_hand_q = {0.0};
       std::array<double, 7> right_hand_dq = {0.0};
       
-      auto left_hand_state_ptr = dex3_hands_.getState(true);
+      auto left_hand_state_ptr = enable_dex3_hands_ ? dex3_hands_.getState(true) : nullptr;
       if (left_hand_state_ptr) {
         for (int i = 0; i < 7; ++i) {
           left_hand_q[i] = left_hand_state_ptr->motor_state()[i].q();
@@ -2914,7 +2919,7 @@ class G1Deploy {
         }
       }
       
-      auto right_hand_state_ptr = dex3_hands_.getState(false);
+      auto right_hand_state_ptr = enable_dex3_hands_ ? dex3_hands_.getState(false) : nullptr;
       if (right_hand_state_ptr) {
         for (int i = 0; i < 7; ++i) {
           right_hand_q[i] = right_hand_state_ptr->motor_state()[i].q();
@@ -3951,16 +3956,16 @@ class G1Deploy {
           auto motor_command_end_time = std::chrono::steady_clock::now();
 
           // Update Dex3 hands max close ratio from keyboard-controlled value (X/C keys)
-          dex3_hands_.SetMaxCloseRatio(input_interface_->GetMaxCloseRatio());
+          if (enable_dex3_hands_) dex3_hands_.SetMaxCloseRatio(input_interface_->GetMaxCloseRatio());
           
           // set hand poses (use buffered data for consistency)
-          dex3_hands_.setAllJointsCommand(true, left_hand_joint_buffer_);
-          dex3_hands_.setAllJointsCommand(false, right_hand_joint_buffer_);
+          if (enable_dex3_hands_) dex3_hands_.setAllJointsCommand(true, left_hand_joint_buffer_);
+          if (enable_dex3_hands_) dex3_hands_.setAllJointsCommand(false, right_hand_joint_buffer_);
           
           // Update last hand actions for logging (use buffered data)
           for (int i = 0; i < 7; ++i) {
-            last_left_hand_action[i] = left_hand_joint_buffer_[i];
-            last_right_hand_action[i] = right_hand_joint_buffer_[i];
+            last_left_hand_action[i] = enable_dex3_hands_ ? left_hand_joint_buffer_[i] : 0.0;
+            last_right_hand_action[i] = enable_dex3_hands_ ? right_hand_joint_buffer_[i] : 0.0;
           }
           
           auto hand_joint_end_time = std::chrono::steady_clock::now();
@@ -4072,7 +4077,7 @@ class G1Deploy {
             }
             
             // Print hand max close ratio (keyboard-controlled via X/C keys)
-            std::cout << " | HandCloseRatio: " << dex3_hands_.GetMaxCloseRatio();
+            if (enable_dex3_hands_) std::cout << " | HandCloseRatio: " << dex3_hands_.GetMaxCloseRatio();
             
             std::cout << std::endl;
           }
@@ -4130,6 +4135,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --zmq-out-topic <topic>: ZMQ topic/prefix for output (default: g1_debug)" << std::endl;
     std::cout << "  --logs-dir <path>: optional logs output base directory (default: logs/<timestamp>/)" << std::endl;
     std::cout << "  --enable-csv-logs: enable writing CSV logs (default: OFF)" << std::endl;
+    std::cout << "  --disable-dex3-hands: disable all Dex3 initialization and I/O (external Python hands)" << std::endl;
     std::cout << "  --enable-motion-recording: enable motion recording for ZMQ/planner (default: OFF)" << std::endl;
     std::cout << "  --set-compliance <value>: set initial VR 3-point compliance (0.01=rigid, 0.5=compliant; default: [0.5, 0.5, 0.0])" << std::endl;
     std::cout << "                                 Can specify 1 value (both hands) or 3 values (left_wrist,right_wrist,head)" << std::endl;
@@ -4175,6 +4181,7 @@ int main(int argc, char const* argv[]) {
   std::string zmq_topic = "pose";
   bool zmq_conflate = false;  // default off; enable with --zmq-conflate
   bool zmq_verbose = false;
+  bool enableDex3Hands = true;
   bool enableMotionRecording = false;  // default off; enable with --enable-motion-recording
   int zmq_out_port = 5557;
   std::string zmq_out_topic = "g1_debug";
@@ -4354,6 +4361,8 @@ int main(int argc, char const* argv[]) {
       zmq_conflate = true;
     } else if (std::string(argv[i]) == "--zmq-verbose") {
       zmq_verbose = true;
+    } else if (std::string(argv[i]) == "--disable-dex3-hands") {
+      enableDex3Hands = false;
     } else if (std::string(argv[i]) == "--enable-motion-recording") {
       enableMotionRecording = true;
       std::cout << "[INFO] Motion recording enabled" << std::endl;
@@ -4441,7 +4450,8 @@ int main(int argc, char const* argv[]) {
     zmq_out_topic,
     enableMotionRecording,
     initial_compliance,
-    initial_max_close_ratio
+    initial_max_close_ratio,
+    enableDex3Hands
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   

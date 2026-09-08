@@ -263,6 +263,13 @@ No need to activate a virtual environment first — the launcher automatically d
 
 The launcher auto-attaches to the tmux session.  Use `Ctrl+b` then arrow keys to switch between panes.
 
+It also starts a browser camera preview in a separate `camera_web` tmux window.
+Open **http://localhost:8080** on the workstation running the launcher to see all
+camera views. The relay uses the same `--camera-host` and `--camera-port` as the
+exporter, and starts automatically with existing launch commands. It keeps running
+when tmux is detached and stops when the session is killed. Use `Ctrl+b` then `n`
+or `p` to switch windows and view the relay's startup output.
+
 Common options:
 
 | Flag | Default | Description |
@@ -273,6 +280,9 @@ Common options:
 | `--camera-host` | `localhost` | Camera server host (e.g., `192.168.123.164` for real robot) |
 | `--camera-port` | `5555` | Camera server port |
 | `--no-camera-viewer` | *(viewer on)* | Disable the camera viewer pane |
+| `--no-camera-web` | *(web preview on)* | Disable the browser relay; independent of the OpenCV viewer |
+| `--camera-web-host` | `127.0.0.1` | HTTP bind address; use `0.0.0.0` for access from other computers |
+| `--camera-web-port` | `8080` | Browser preview HTTP port on the workstation |
 | `--data-exporter-frequency` | `50` | Recording frequency (Hz) |
 | `--deploy-checkpoint` | *(default)* | Custom checkpoint path for deploy.sh |
 | `--deploy-obs-config` | *(default)* | Custom observation config for deploy.sh |
@@ -409,6 +419,42 @@ Recordings are saved to `camera_recordings/rec_<timestamp>/` with one MP4 per ca
 - Debugging camera server connectivity
 
 Run `python gear_sonic/scripts/run_camera_viewer.py --help` for all options.
+
+### Standalone Browser Preview
+
+Run just the ZMQ-to-HTTP relay, without starting deployment, teleop or recording:
+
+```bash
+python gear_sonic/scripts/run_camera_web.py \
+    --camera-host 192.168.123.164 --camera-port 5555
+```
+
+The script automatically uses `.venv_data_collection` if its dependencies are
+missing from the current Python environment. No additional packages are required
+in the existing data collection environment. Open **http://localhost:8080** on
+the computer running the relay. Stop the standalone process with `Ctrl+C`.
+
+For access from another computer on the LAN:
+
+```bash
+python gear_sonic/scripts/run_camera_web.py \
+    --camera-host 192.168.123.164 --host 0.0.0.0 --port 8080
+```
+
+Then open `http://<relay-computer-IP>:8080`. With the all-in-one launcher, use
+`--camera-web-host 0.0.0.0 --camera-web-port 8080` for the same behavior.
+
+All camera views are tiled into one MJPEG stream, including mono views. Encoding
+is shared between browsers and defaults to at most 15 FPS and 640 pixels per
+camera tile; standalone options `--fps` and `--width` adjust these limits. The
+page reports missing or stale frames and reconnects when camera publishing resumes.
+The relay subscribes to camera data only, so it can run alongside the exporter.
+It provides `/stream` (MJPEG) and `/status` (JSON) as well as the preview page.
+
+If a standalone relay is already using port 8080, launch data collection with
+`--no-camera-web` to use that relay, or choose another `--camera-web-port` for a
+separate instance. `--no-camera-viewer` disables only the OpenCV window and leaves
+the browser preview enabled.
 
 ---
 

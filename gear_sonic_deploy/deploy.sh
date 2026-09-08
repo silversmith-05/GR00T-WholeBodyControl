@@ -211,6 +211,7 @@ show_usage() {
     echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
     echo "  --output-type TYPE      Set the output type (default: ros2)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
+    echo "  --disable-dex3-hands    Disable legacy hand driver (required for Inspire)"
     echo ""
     echo "Interface modes:"
     echo "  sim              Use loopback interface for simulation (MuJoCo)"
@@ -252,9 +253,15 @@ INPUT_TYPE="$INPUT_TYPE_DEFAULT"
 OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
 ZMQ_HOST="$ZMQ_HOST_DEFAULT"
 
+DISABLE_DEX3_HANDS=false
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --disable-dex3-hands)
+            DISABLE_DEX3_HANDS=true
+            shift
+            ;;
         -h|--help)
             show_usage
             exit 0
@@ -381,8 +388,11 @@ CHECKPOINT_ENCODER="${CHECKPOINT}_encoder.onnx"
 
 # Additional flags for simulation mode
 EXTRA_ARGS=""
+if [[ "$DISABLE_DEX3_HANDS" == true ]]; then
+    EXTRA_ARGS="--disable-dex3-hands"
+fi
 if [[ "$ENV_TYPE" == "sim" ]]; then
-    EXTRA_ARGS="--disable-crc-check"
+    EXTRA_ARGS="$EXTRA_ARGS --disable-crc-check"
     echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
     echo ""
 fi
