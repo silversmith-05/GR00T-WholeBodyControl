@@ -376,7 +376,7 @@ class ComposedCameraSensor(Sensor, SensorServer):
             from gear_sonic.camera.drivers.realsense import RealSenseSensor
 
             print(f"Initializing RealSense sensor for camera type: {camera_type}")
-            return RealSenseSensor(mount_position=mount_position)
+            return RealSenseSensor(mount_position=mount_position, device_id=device_id)
 
         elif camera_type.endswith(".mp4"):
             from gear_sonic.camera.drivers.dummy import ReplayDummySensor

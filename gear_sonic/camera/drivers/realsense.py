@@ -46,7 +46,9 @@ class RealSenseSensor(Sensor, SensorServer):
         config: RealSenseConfig = RealSenseConfig(),
         id: int = 0,
         mount_position: str = CameraMountPosition.EGO_VIEW.value,
+        device_id: str | None = None,
     ):
+        """Select by serial number, or by sorted index when no serial is supplied."""
         devices = rs.context().query_devices()
         if len(devices) == 0:
             raise RuntimeError("No RealSense devices found")
@@ -56,10 +58,23 @@ class RealSenseSensor(Sensor, SensorServer):
             print(f"    Serial number: {device.get_info(rs.camera_info.serial_number)}")
             print(f"    Firmware version: {device.get_info(rs.camera_info.firmware_version)}")
 
+        devices = sorted(devices, key=lambda x: x.get_info(rs.camera_info.serial_number))
+        serial_numbers = [device.get_info(rs.camera_info.serial_number) for device in devices]
+        if device_id is not None:
+            if device_id not in serial_numbers:
+                raise RuntimeError(
+                    f"RealSense serial {device_id!r} not found for {mount_position}. "
+                    f"Available serial numbers: {', '.join(serial_numbers)}"
+                )
+            serial_number = device_id
+        else:
+            if not 0 <= id < len(devices):
+                raise ValueError(f"RealSense index {id} out of range for {len(devices)} devices")
+            serial_number = serial_numbers[id]
+
         self.pipeline = rs.pipeline()
         self.config = rs.config()
-        devices = sorted(devices, key=lambda x: x.get_info(rs.camera_info.serial_number))
-        self.config.enable_device(devices[id].get_info(rs.camera_info.serial_number))
+        self.config.enable_device(serial_number)
 
         try:
             self.config.enable_stream(
@@ -87,7 +102,7 @@ class RealSenseSensor(Sensor, SensorServer):
             self.start_server(port)
         print(
             f"Done initializing RealSense sensor: "
-            f"{devices[id].get_info(rs.camera_info.serial_number)}"
+            f"{serial_number} ({mount_position})"
         )
 
     def read(self) -> dict[str, Any] | None:
