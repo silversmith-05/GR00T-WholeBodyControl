@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 import cv2
 import msgpack
@@ -132,6 +133,46 @@ class CameraWebTests(unittest.TestCase):
         image = self.read_jpeg(self.get("/stream"))
         self.assertLess(image[65, 170].mean(), 50)
 
+    def test_browsers_can_select_different_views_and_receive_updates(self):
+        self.publish({
+            "ego": np.full((80, 120, 3), (255, 0, 0), dtype=np.uint8),
+            "left_wrist": np.full((80, 120, 3), (0, 255, 0), dtype=np.uint8),
+            "right_wrist": np.full((80, 120, 3), (0, 0, 255), dtype=np.uint8),
+        })
+        single = self.get("/stream?camera=right_wrist")
+        pair = self.get("/stream?camera=right_wrist&camera=left_wrist")
+        all_views = self.get("/stream")
+        image = self.read_jpeg(single)
+        self.assertEqual(image.shape, (112, 120, 3))
+        np.testing.assert_allclose(image[65, 50], [255, 0, 0], atol=8)
+        image = self.read_jpeg(pair)
+        self.assertEqual(image.shape, (112, 240, 3))
+        np.testing.assert_allclose(image[65, 50], [0, 255, 0], atol=8)
+        np.testing.assert_allclose(image[65, 170], [255, 0, 0], atol=8)
+        self.assertEqual(self.read_jpeg(all_views).shape, (224, 240, 3))
+        self.publish({"right_wrist": np.full((80, 120, 3), (255, 255, 0), dtype=np.uint8)})
+        np.testing.assert_allclose(self.read_jpeg(single)[65, 50], [0, 255, 255], atol=8)
+        np.testing.assert_allclose(self.read_jpeg(pair)[65, 170], [0, 255, 255], atol=8)
+        np.testing.assert_allclose(self.read_jpeg(all_views)[180, 50], [0, 255, 255], atol=8)
+        self.assertEqual(len(json.loads(self.get("/status").read())["cameras"]), 3)
+
+    def test_selection_handles_encoded_names_duplicates_and_invalid_views(self):
+        name = "wrist / left & color"
+        self.publish({name: np.full((80, 120, 3), 120, dtype=np.uint8)})
+        query = urlencode({"camera": [name, name]}, doseq=True)
+        self.assertEqual(self.read_jpeg(self.get("/stream?" + query)).shape, (112, 120, 3))
+        for path, status in (("/stream?camera=", 400), ("/stream?camera=missing", 404)):
+            response = self.get(path)
+            self.assertEqual(response.status, status)
+            response.read()
+
+    def test_selected_view_heartbeat_never_falls_back_to_all_cameras(self):
+        frame = np.full((80, 120, 3), 120, dtype=np.uint8)
+        self.publish({"ego": frame, "wrist": frame})
+        response = self.get("/stream?camera=wrist")
+        self.assertEqual(self.read_jpeg(response).shape, (112, 120, 3))
+        self.assertEqual(self.read_jpeg(response).shape, (112, 120, 3))
+
     def unused_port(self):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -192,7 +233,7 @@ class CameraWebTests(unittest.TestCase):
         port = self.unused_port()
         command = [shutil.which("python3"), str(root / "gear_sonic/scripts/run_camera_web.py"),
                    "--camera-host", "127.0.0.1", "--camera-port", str(self.camera_port),
-                   "--port", str(port)]
+                   "--host", "127.0.0.1", "--port", str(port)]
         process = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             self.assertEqual(self.wait_http(port)["source"], f"tcp://127.0.0.1:{self.camera_port}")
@@ -221,7 +262,8 @@ class CameraWebTests(unittest.TestCase):
             run = subprocess.run
             try:
                 config = launcher.DataCollectionLaunchConfig(
-                    camera_host="127.0.0.1", camera_port=self.camera_port, camera_web_port=port)
+                    camera_host="127.0.0.1", camera_port=self.camera_port,
+                    camera_web_host="127.0.0.1", camera_web_port=port)
                 with patch.object(launcher, "SESSION_NAME", "preview_test"), \
                      patch.object(launcher.subprocess, "run", side_effect=lambda args, **kw: run(
                          [*tmux, *args[1:]], **kw)):
@@ -255,7 +297,7 @@ class CameraWebLaunchTests(unittest.TestCase):
             hand_backend="inspire", enable_hand_control=True,
             inspire_left_ip="192.168.123.211", inspire_right_ip="192.168.123.210",
             inspire_port=6000, camera_port=5560, camera_web_port=8090,
-            camera_web_host="0.0.0.0", camera_viewer=False,
+            camera_viewer=False,
         )
         windows = [call for call in calls if call[:2] == ["tmux", "new-window"]]
         self.assertEqual(len(windows), 1)

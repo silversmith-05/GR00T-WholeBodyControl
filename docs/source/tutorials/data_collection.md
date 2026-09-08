@@ -264,8 +264,9 @@ No need to activate a virtual environment first — the launcher automatically d
 The launcher auto-attaches to the tmux session.  Use `Ctrl+b` then arrow keys to switch between panes.
 
 It also starts a browser camera preview in a separate `camera_web` tmux window.
-Open **http://localhost:8080** on the workstation running the launcher to see all
-camera views. The relay uses the same `--camera-host` and `--camera-port` as the
+Open **http://localhost:8080** on the workstation running the launcher, or
+`http://<workstation-IP>:8080` from another device on the LAN, to see all camera
+views. The relay listens on `0.0.0.0` by default and uses the same `--camera-host` and `--camera-port` as the
 exporter, and starts automatically with existing launch commands. It keeps running
 when tmux is detached and stops when the session is killed. Use `Ctrl+b` then `n`
 or `p` to switch windows and view the relay's startup output.
@@ -281,7 +282,7 @@ Common options:
 | `--camera-port` | `5555` | Camera server port |
 | `--no-camera-viewer` | *(viewer on)* | Disable the camera viewer pane |
 | `--no-camera-web` | *(web preview on)* | Disable the browser relay; independent of the OpenCV viewer |
-| `--camera-web-host` | `127.0.0.1` | HTTP bind address; use `0.0.0.0` for access from other computers |
+| `--camera-web-host` | `0.0.0.0` | HTTP bind address; LAN access by default, or `127.0.0.1` for local access only |
 | `--camera-web-port` | `8080` | Browser preview HTTP port on the workstation |
 | `--data-exporter-frequency` | `50` | Recording frequency (Hz) |
 | `--deploy-checkpoint` | *(default)* | Custom checkpoint path for deploy.sh |
@@ -434,22 +435,43 @@ missing from the current Python environment. No additional packages are required
 in the existing data collection environment. Open **http://localhost:8080** on
 the computer running the relay. Stop the standalone process with `Ctrl+C`.
 
-For access from another computer on the LAN:
+LAN access is enabled by default in both standalone and all-in-one modes
+(`0.0.0.0:8080`). Other devices can open `http://<relay-computer-IP>:8080` without
+additional launch options. To restrict access to this computer, use
+`--host 127.0.0.1` with the standalone script or `--camera-web-host 127.0.0.1`
+with the all-in-one launcher.
 
-```bash
-python gear_sonic/scripts/run_camera_web.py \
-    --camera-host 192.168.123.164 --host 0.0.0.0 --port 8080
-```
+The **Camera views** checkboxes select which views to display; use **Select all**
+or **Clear selection** to change them together. All views are selected by default,
+including mono views. Each browser saves its own selection for the camera source
+and restores it on reload. Selections affect only browser preview, so different
+devices can watch different views while the exporter continues recording normally.
 
-Then open `http://<relay-computer-IP>:8080`. With the all-in-one launcher, use
-`--camera-web-host 0.0.0.0 --camera-web-port 8080` for the same behavior.
+Each selected view appears in its own card. Drag a card's title onto another card
+to change their order, or focus the title and use the arrow keys. The **Columns**
+menu chooses an automatic layout or one to four columns. **Reset layout** restores
+the default order and automatic columns without changing the selected cameras.
+The browser remembers the order and column choice after refresh. Rearranging
+cards keeps the video connection running and applies in expanded view too.
 
-All camera views are tiled into one MJPEG stream, including mono views. Encoding
-is shared between browsers and defaults to at most 15 FPS and 640 pixels per
-camera tile; standalone options `--fps` and `--width` adjust these limits. The
+The preview fits the browser viewport without page scrolling. Selected views scale
+to the remaining space below the controls while preserving their aspect ratio, so
+the full image stays visible. Use **Expand view** to fill the webpage with the
+camera cards and temporarily hide the view controls. The browser's tabs and
+address bar remain visible. Press **Escape** or **Exit expanded view** to restore
+the controls and keep the current view selection.
+
+Selected camera views use one shared MJPEG connection and are displayed as
+reorderable cards in the browser, so even nine views do not exhaust the browser's
+per-host connection limit. Encoding is shared between browsers with the same
+selection and defaults to at most 15 FPS and 640 pixels per camera tile;
+standalone options `--fps` and `--width` adjust the relay's limits (the card display
+refreshes at up to 15 FPS). The
 page reports missing or stale frames and reconnects when camera publishing resumes.
 The relay subscribes to camera data only, so it can run alongside the exporter.
 It provides `/stream` (MJPEG) and `/status` (JSON) as well as the preview page.
+Direct MJPEG clients can select views with repeated `camera` query parameters,
+for example `/stream?camera=ego_view&camera=left_wrist`. Omit them to show all views.
 
 If a standalone relay is already using port 8080, launch data collection with
 `--no-camera-web` to use that relay, or choose another `--camera-web-port` for a

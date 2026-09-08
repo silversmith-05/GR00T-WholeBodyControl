@@ -3,7 +3,8 @@
 Usage (from repo root):
     python gear_sonic/scripts/run_camera_web.py --camera-host 192.168.123.164
 
-Open http://localhost:8080. Use --host 0.0.0.0 for access from other computers.
+Open http://localhost:8080, or http://<this computer's IP>:8080 from the LAN.
+Listens on all IPv4 interfaces by default. Use --host 127.0.0.1 for local access only.
 """
 
 import argparse
@@ -44,7 +45,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--camera-host", default="localhost", help="ZMQ camera server host")
     parser.add_argument("--camera-port", type=_port, default=5555, help="ZMQ camera server port (default: 5555)")
-    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
+    parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address (default: 0.0.0.0; LAN access)")
     parser.add_argument("--port", type=_port, default=8080, help="HTTP port (default: 8080)")
     parser.add_argument("--fps", type=_positive_int, default=15, help="Maximum preview FPS (default: 15)")
     parser.add_argument("--width", type=_positive_int, default=640, help="Maximum tile width (default: 640)")

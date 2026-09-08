@@ -187,8 +187,8 @@ class DataCollectionLaunchConfig:
     camera_web: bool = True
     """Start the browser preview relay in a separate camera_web tmux window."""
 
-    camera_web_host: str = "127.0.0.1"
-    """HTTP bind address. Use 0.0.0.0 to allow access from other computers."""
+    camera_web_host: str = "0.0.0.0"
+    """HTTP bind address (LAN access by default). Use 127.0.0.1 for local access only."""
 
     camera_web_port: int = 8080
     """HTTP port for browser preview on this workstation."""
