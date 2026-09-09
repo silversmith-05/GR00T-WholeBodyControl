@@ -5,7 +5,7 @@ import numpy as np
 import copy
 
 from gear_sonic.utils.teleop.inspire_hand_controller import (
-    ANGLES, HAND_SCHEMA_VERSION, PRESET_REVISION, CLOSE_ANGLES, validate_close_angles,
+    ANGLES, HAND_FORCE, HAND_SCHEMA_VERSION, PRESET_REVISION, CLOSE_ANGLES, validate_close_angles,
 )
 
 HAND_METADATA = {
@@ -33,7 +33,7 @@ HAND_METADATA = {
     "angle_order": ["little", "ring", "middle", "index", "thumb_bend", "thumb_rotation"],
     "angle_unit": "device scale (0..1000); NOT radians or degrees",
     "release": list(ANGLES[0]),
-    "close": list(ANGLES[1]), "speed": [200] * 6, "force": [200] * 6,
+    "close": list(ANGLES[1]), "speed": [200] * 6, "force": [HAND_FORCE] * 6,
     "grasp": "fixed binary five-finger targets, simultaneous bend command; thumb rotation independently retained. "
              "No trigger interpolation, measured completion or ball-size-to-angle calibration assumed. "
              "The close template first five values are fixed for this dataset; channel six is overridden by rotation action.",

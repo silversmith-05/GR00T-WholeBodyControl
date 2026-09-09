@@ -16,6 +16,8 @@ import threading
 import time
 
 LOG = logging.getLogger(__name__)
+# Shared force threshold for all six channels on both hands; not a torque in N·m.
+HAND_FORCE = 500
 # Fixed five-finger targets. Lower bend values close further on RH56E2.
 # Starting values for small-ball calibration, NOT a verified ball diameter/pose.
 CLOSE_ANGLES = (250, 250, 250, 250, 300)
@@ -46,6 +48,7 @@ def validate_inspire_sdk():
 
     if version("inspire-rh56e2") != "0.3.0":
         raise RuntimeError("Inspire backend requires inspire-rh56e2==0.3.0")
+    # SDK built-in defaults are independent of the application's HAND_FORCE.
     for i, preset in enumerate((RELEASE, CLOSE)):
         if (preset.name != PRESETS[i] or preset.angle != SDK_ANGLES[i]
                 or preset.speed != (200,) * 6 or preset.force != (200,) * 6):
@@ -60,7 +63,7 @@ def hand_preset(target, thumb_rotation=None, close_angles=CLOSE_ANGLES):
         raise ValueError("Hand target must be 0=release or 1=close")
     bends = validate_close_angles(close_angles) if target else ANGLES[0][:5]
     angles = (*bends, 339 if thumb_rotation is None else thumb_rotation)
-    return HandPreset(PRESETS[target], angles, force=200, speed=200)
+    return HandPreset(PRESETS[target], angles, force=HAND_FORCE, speed=200)
 
 
 @dataclass(frozen=True)
@@ -459,13 +462,13 @@ class _HandWorker:
         status, error = "confirmed", ""
         try:
             client.enable_writes()
-            # SDK order: force=200, speed=200, then angle. Guard runs before EACH write.
+            # SDK order: configured force, speed=200, then angle. Guard runs before EACH write.
             if command.target == -1:
                 from inspire_rh56e2.presets import HandPreset
                 # RH56E2 manual §2.6.11 / SDK simulator: -1 leaves that DOF still.
                 # Before any explicit grasp, rotation must not invent finger targets.
                 preset = HandPreset("thumb_rotation", (-1,) * 5 + (command.thumb_rotation,),
-                                    force=200, speed=200)
+                                    force=HAND_FORCE, speed=200)
             else:
                 preset = hand_preset(command.target, command.thumb_rotation, self.close_angles)
             client.apply_preset(preset, guard=lambda: self._guard(command))
@@ -514,7 +517,7 @@ class _HandWorker:
         try:
             client.enable_writes()
             if not self.settings_ready:
-                client.command(Command(force=(200,)*6, speed=(200,)*6), guard=guard)
+                client.command(Command(force=(HAND_FORCE,)*6, speed=(200,)*6), guard=guard)
                 self.settings_ready = True
             bends = ((-1,)*5 if command.target == -1 else
                      self.close_angles if command.target == 1 else ANGLES[0][:5])
