@@ -112,12 +112,13 @@ document.addEventListener('keydown', event => {
 });
 const controls = new Map();
 const cards = new Map();
-const rotations = new Map(); // Clockwise quarter turns, saved separately for each camera.
+const defaultViews = ['left_wrist', 'ego_view', 'right_wrist'];
+const rotations = new Map([['left_wrist', 3], ['right_wrist', 3]]); // Clockwise quarter turns.
 let latest = null;
-let selection = null; // null means all views, including newly discovered cameras.
+let selection = [...defaultViews]; // Only available views appear; null explicitly selects all views.
 let storageKey = null;
 let layoutKey = null;
-let viewOrder = [];
+let viewOrder = [...defaultViews];
 let columnPreference = 0;
 let gridColumns = 1;
 let drag = null;
@@ -157,7 +158,7 @@ function layoutGrid() {
 new ResizeObserver(layoutGrid).observe(preview);
 columns.onchange = () => { columnPreference = Number(columns.value); saveLayout(); layoutGrid(); };
 document.getElementById('reset-layout').onclick = () => {
-  viewOrder = []; columnPreference = 0; columns.value = '0'; saveLayout(); render();
+  viewOrder = [...defaultViews]; columnPreference = 0; columns.value = '0'; saveLayout(); render();
 };
 function moveView(name, target) {
   const allNames = orderedNames(latest.cameras.map(camera => camera.name));
@@ -340,11 +341,14 @@ async function update() {
     if (!response.ok) throw new Error('Status unavailable');
     latest = await response.json();
     if (!storageKey) {
-      storageKey = 'sonic-camera-views:' + latest.source;
-      layoutKey = 'sonic-camera-layout:' + latest.source;
+      // Version the preferences so older all-camera layouts do not override the new RGB defaults.
+      storageKey = 'sonic-camera-views:rgb-v1:' + latest.source;
+      layoutKey = 'sonic-camera-layout:rgb-v1:' + latest.source;
       try {
-        const saved = JSON.parse(localStorage.getItem(storageKey));
-        if (Array.isArray(saved) && saved.every(name => typeof name === 'string')) selection = saved;
+        const raw = localStorage.getItem(storageKey);
+        const saved = JSON.parse(raw);
+        if (raw !== null && (saved === null ||
+            (Array.isArray(saved) && saved.every(name => typeof name === 'string')))) selection = saved;
       } catch (_) {}
       try {
         const saved = JSON.parse(localStorage.getItem(layoutKey));

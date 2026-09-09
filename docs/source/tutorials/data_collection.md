@@ -538,25 +538,35 @@ additional launch options. To restrict access to this computer, use
 with the all-in-one launcher.
 
 The **Camera views** checkboxes select which views to display; use **Select all**
-or **Clear selection** to change them together. All views are selected by default,
-including mono views. Each browser saves its own selection for the camera source
+or **Clear selection** to change them together. By default, only the available RGB
+views are selected, in the order **left_wrist, ego_view, right_wrist**. If only the
+ego camera is available, only **ego_view** RGB is shown; unavailable cameras do not
+leave empty cards. Mono views are initially unchecked and can be enabled manually.
+Each browser saves its own selection for the camera source
 and restores it on reload. Selections affect only browser preview, so different
 devices can watch different views while the exporter continues recording normally.
 
 Each selected view appears in its own card. Drag a card's title onto another card
 to change their order, or focus the title and use the arrow keys. The **Columns**
 menu chooses an automatic layout or one to four columns. **Reset layout** restores
-the default order and automatic columns without changing the selected cameras.
+the default left/ego/right order and automatic columns without changing the
+selected cameras.
 The browser remembers the order and column choice after refresh. Rearranging
 cards keeps the video connection running and applies in expanded view too.
 
 Use the rotate button at the right of each card's title to turn that image
 clockwise by 90 degrees per click (0, 90, 180, 270, then back to 0). The button
-shows the current angle. Each camera's rotation is saved in this browser for the
-camera source, including after hiding and showing the view or refreshing the page.
+shows the current angle. **left_wrist** and **right_wrist** RGB default to **270
+degrees**, and **ego_view** defaults to **0 degrees**. Each camera's rotation is
+saved in this browser for the camera source, including after hiding and showing
+the view or refreshing the page.
 Rotated images fit inside their cards without cropping, including in expanded
 view. Rotation affects only the browser preview and keeps recording and the
 video connection unchanged. **Reset layout** preserves these rotation angles.
+
+These RGB defaults apply to every browser. On the first load after this update,
+older saved selections and layouts are ignored so they cannot override the new
+defaults. Subsequent manual changes are remembered as usual.
 
 The preview fits the browser viewport without page scrolling. Selected views scale
 to the remaining space below the controls while preserving their aspect ratio, so
