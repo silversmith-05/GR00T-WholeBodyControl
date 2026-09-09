@@ -11,7 +11,7 @@ import signal
 import time
 
 from gear_sonic.utils.teleop.inspire_hand_controller import (
-    CLOSE_ANGLES, acquire_hand_lock, hand_preset, validate_inspire_sdk, validate_close_angles,
+    CLOSE_ANGLES, HAND_FORCE, acquire_hand_lock, hand_preset, validate_inspire_sdk, validate_close_angles,
 )
 
 HOSTS = {"left": "192.168.123.211", "right": "192.168.123.210"}
@@ -53,7 +53,7 @@ def run_session(side, *, host=None, port=6000, enable_control=False, timeout=0.3
                 return 0
 
             output_fn(f"[{label}] 已进入手动测试；启动未发送开合。")
-            output_fn("输入 0=放开、1=闭合、s=读取实际角度、q=退出，然后回车。速度/力阈值均为六路 200。")
+            output_fn(f"输入 0=放开、1=闭合、s=读取实际角度、q=退出，然后回车。速度为六路 200，力阈值为六路 {HAND_FORCE}。")
             while True:
                 try:
                     command = input_fn(f"{LABELS[side]} [0/1/s/q]> ").strip().lower()
