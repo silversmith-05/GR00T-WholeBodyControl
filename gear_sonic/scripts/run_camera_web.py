@@ -49,6 +49,7 @@ def main(argv=None):
     parser.add_argument("--port", type=_port, default=8080, help="HTTP port (default: 8080)")
     parser.add_argument("--fps", type=_positive_int, default=15, help="Maximum preview FPS (default: 15)")
     parser.add_argument("--width", type=_positive_int, default=640, help="Maximum tile width (default: 640)")
+    parser.add_argument("--recording-status-file", help="Shared exporter status file (default: local file per camera source)")
     args = parser.parse_args(argv)
 
     _bootstrap_venv()
@@ -56,7 +57,7 @@ def main(argv=None):
 
     relay = CameraRelay(args.camera_host, args.camera_port, args.fps, args.width)
     try:
-        server = CameraWebServer((args.host, args.port), relay)
+        server = CameraWebServer((args.host, args.port), relay, args.recording_status_file)
     except OSError as exc:
         parser.exit(1, f"Cannot start camera web preview on {args.host}:{args.port}: {exc}\n"
                     "Choose another --port or stop the existing preview service.\n")

@@ -18,13 +18,16 @@ import time
 LOG = logging.getLogger(__name__)
 # Shared force threshold for all six channels on both hands; not a torque in N·m.
 HAND_FORCE = 500
+# Shared open target for little, ring, middle and index fingers on both hands.
+# Edit only this value (device scale 0..1000), then restart control and recording.
+OPEN_FINGER_ANGLE = 850
 # Fixed five-finger targets. Lower bend values close further on RH56E2.
 # Starting values for small-ball calibration, NOT a verified ball diameter/pose.
 CLOSE_ANGLES = (250, 250, 250, 250, 300)
-ANGLES = ((1000, 1000, 1000, 1000, 1000, 339), (*CLOSE_ANGLES, 339))
+ANGLES = ((OPEN_FINGER_ANGLE,) * 4 + (1000, 339), (*CLOSE_ANGLES, 339))
 PRESETS = ("release", "close")
 HAND_SCHEMA_VERSION = 4
-PRESET_REVISION = 3
+PRESET_REVISION = 5
 SDK_ANGLES = ((1000, 1000, 1000, 592, 720, 339), (1000, 1000, 1000, 1000, 1000, 339))
 WRITE_STATUS = {"none": 0, "pending": 1, "confirmed": 2, "unconfirmed": 3,
                 "failed": 4, "cancelled": 5}

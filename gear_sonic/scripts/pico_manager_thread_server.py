@@ -2035,7 +2035,7 @@ def run_pico_manager(
     try:
         if hand_backend == "inspire":
             from gear_sonic.utils.teleop.inspire_hand_controller import (
-                InspireHandController, PicoHandBridge,
+                ANGLES, InspireHandController, PicoHandBridge,
             )
             hands = InspireHandController(inspire_left_ip, inspire_right_ip,
                                           port=inspire_port, enabled=enable_hand_control,
@@ -2044,7 +2044,7 @@ def run_pico_manager(
             hands.start()
             print(f"[Inspire] RH56E2-T1: left={inspire_left_ip}:{inspire_port}, "
                   f"right={inspire_right_ip}:{inspire_port}; control={enable_hand_control}")
-            print("[Inspire] 0=release [1000,1000,1000,1000,1000,theta]; "
+            print(f"[Inspire] 0=release {list(ANGLES[0][:5])} + theta; "
                   f"1=five-finger close {list(inspire_close_angles)} + theta; each hand keeps its own theta")
             print(f"[Inspire] Single-click on release: X/Y=left -/+{left_thumb.step} "
                   f"[{left_thumb.minimum},{left_thumb.maximum}], A/B=right -/+{right_thumb.step} "

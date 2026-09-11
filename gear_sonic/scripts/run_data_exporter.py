@@ -44,6 +44,9 @@ from gear_sonic.data.features_sonic_vla import (
 )
 from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 from gear_sonic.utils.data_collection.episode_state import EpisodeState
+from gear_sonic.utils.data_collection.recording_status import (
+    RecordingStatusPublisher, default_recording_status_path,
+)
 from gear_sonic.utils.data_collection.keyboard_subscriber import ZMQKeyboardSubscriber
 from gear_sonic.utils.data_collection.telemetry import Telemetry
 from gear_sonic.utils.data_collection.text_to_speech import TextToSpeech
@@ -111,6 +114,9 @@ class SonicDataExporterConfig:
 
     text_to_speech: bool = True
     """Use text-to-speech voice feedback."""
+
+    recording_status_file: str | None = None
+    """Optional shared status file for browser preview; defaults to a local file per camera source."""
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +244,7 @@ class GrootDataCollector:
         state_zmq_port: int = 5557,
         hand_backend: str = "dex3",
         inspire_close_angles: tuple = CLOSE_ANGLES,
+        recording_status_file: str | None = None,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
@@ -301,10 +308,25 @@ class GrootDataCollector:
         self._initial_yaw = None
 
         print(f"Recording to {self.data_exporter.meta.root}")
+        self._recording_status = RecordingStatusPublisher(
+            recording_status_file or default_recording_status_path(camera_host, camera_port),
+            dataset=Path(self.data_exporter.meta.root).name,
+        )
 
     @property
     def current_episode_index(self):
         return self.data_exporter.episode_buffer["episode_index"]
+
+    def _set_recording_status(self, **changes):
+        publisher = getattr(self, "_recording_status", None)
+        if publisher is not None:
+            if "episode_index" in changes:
+                changes["episode_index"] = int(changes["episode_index"])
+            publisher.update(**changes)
+
+    def _mark_hand_episode_fault(self):
+        self._hand_episode_fault = True
+        self._set_recording_status(discarded=True, discard_reason="hand_fault")
 
     def _print_and_say(self, message: str, say: bool = True, blocking: bool = False):
         if self.text_to_speech is not None:
@@ -344,16 +366,20 @@ class GrootDataCollector:
                     [h["fault_count"] for h in self.latest_hand_msg["hands"]]
                     if self.latest_hand_msg is not None else None
                 )
+                self._set_recording_status(state="recording", episode_index=self.current_episode_index,
+                                           discarded=False, discard_reason=None, result=None)
                 self._print_and_say(
                     f"Started recording {self.current_episode_index}", blocking=False
                 )
             elif self._episode_state.get_state() == self._episode_state.NEED_TO_SAVE:
+                self._set_recording_status(state="saving")
                 self._print_and_say("Stopping recording, preparing to save", blocking=False)
             elif self._episode_state.get_state() == self._episode_state.IDLE:
+                self._set_recording_status(state="idle")
                 self._print_and_say("Saved episode and back to idle state", blocking=False)
         elif key == "x":
             if self._episode_state.get_state() == self._episode_state.RECORDING:
-                self.data_exporter.save_episode_as_discarded()
+                self._save_episode(discard_reason="operator")
                 self._episode_state.reset_state()
                 self._initial_yaw = None
                 self._print_and_say("Discarded episode", blocking=False)
@@ -383,7 +409,7 @@ class GrootDataCollector:
                 except (ValueError, KeyError, TypeError) as exc:
                     self.latest_hand_msg = None
                     if self._episode_state.get_state() == self._episode_state.RECORDING:
-                        self._hand_episode_fault = True
+                        self._mark_hand_episode_fault()
                     print(f"[Inspire] Invalid feedback: {exc}")
             elif raw.startswith(b"manager_state"):
                 self._handle_manager_state(raw)
@@ -585,13 +611,25 @@ class GrootDataCollector:
         self._hand_fault_counts = counts
         if fault and not self._hand_episode_fault:
             print("[Inspire] Episode marked discarded: invalid hand input/feedback or write fault")
-        self._hand_episode_fault |= fault
+        if fault:
+            self._mark_hand_episode_fault()
 
-    def _save_episode(self):
-        if self.hand_backend == "inspire" and self._hand_episode_fault:
-            self.data_exporter.save_episode_as_discarded()
-        else:
-            self.data_exporter.save_episode()
+    def _save_episode(self, discard_reason=None):
+        if discard_reason is None and self.hand_backend == "inspire" and self._hand_episode_fault:
+            discard_reason = "hand_fault"
+        discarded = discard_reason is not None
+        # Capture this index before save_episode replaces the buffer with the next episode.
+        self._set_recording_status(state="saving", episode_index=self.current_episode_index,
+                                   discarded=discarded, discard_reason=discard_reason, result=None)
+        try:
+            if discarded:
+                self.data_exporter.save_episode_as_discarded()
+            else:
+                self.data_exporter.save_episode()
+        except Exception:
+            self._set_recording_status(state="error", result="save_failed")
+            raise
+        self._set_recording_status(state="idle", result="discarded" if discarded else "saved")
 
     def _finalize_frame(self, t_start: float) -> bool:
         t_end = time.monotonic()
@@ -606,6 +644,7 @@ class GrootDataCollector:
                 self._initial_yaw = None
                 self._print_and_say("Finished saving episode")
             else:
+                self._set_recording_status(state="idle", result="empty")
                 self._print_and_say("Skipping save: no frames collected", say=False)
             self._episode_state.change_state()
         return True
@@ -688,7 +727,8 @@ class GrootDataCollector:
             frame_data["observation.capture_time"] = np.asarray(capture_times, dtype=np.float64)
             frame_data["observation.capture_time_valid"] = np.asarray(
                 [np.isfinite(t) and t > 0 for t in capture_times], dtype=bool)
-            self._hand_episode_fault |= bool(hand_frame["hand.episode_fault"][0])
+            if bool(hand_frame["hand.episode_fault"][0]):
+                self._mark_hand_episode_fault()
 
         self._add_images_to_frame_data(frame_data)
 
@@ -979,10 +1019,13 @@ class GrootDataCollector:
             print("Data exporter terminated by user")
             buffer_size = self.data_exporter.episode_buffer.get("size", 0)
             if buffer_size > 0:
-                self.data_exporter.save_episode_as_discarded()
+                self._save_episode(discard_reason="shutdown")
 
         finally:
-            self.save_and_cleanup()
+            try:
+                self.save_and_cleanup()
+            finally:
+                self._recording_status.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1069,6 +1112,7 @@ def main(config: SonicDataExporterConfig):
         state_zmq_port=config.state_zmq_port,
         hand_backend=config.hand_backend,
         inspire_close_angles=config.inspire_close_angles,
+        recording_status_file=config.recording_status_file,
     )
     data_collector.run()
 

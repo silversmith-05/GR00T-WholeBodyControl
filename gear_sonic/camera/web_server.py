@@ -12,6 +12,9 @@ import cv2
 import numpy as np
 
 from gear_sonic.camera.sensor_server import ImageMessageSchema, SensorClient
+from gear_sonic.utils.data_collection.recording_status import (
+    default_recording_status_path, read_recording_status,
+)
 
 
 PAGE = b"""<!doctype html>
@@ -28,6 +31,16 @@ header { display:flex; align-items:center; justify-content:space-between; gap:12
 h1 { font-size:20px; margin:0; min-width:0; }
 #source, #status { font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #source { color:#9aacc5; }
+#session-status { min-width:0; display:flex; flex-direction:column; gap:5px; }
+#recording-status { display:flex; align-items:center; flex-wrap:wrap; gap:4px 12px; font-size:13px; }
+#recording-state, #recording-discard { white-space:nowrap; }
+#recording-state { color:#9aacc5; }
+#recording-status[data-state="recording"] #recording-state { color:#ff6677; }
+#recording-status[data-state="saving"] #recording-state { color:#79bfff; }
+#recording-status[data-state="idle"] #recording-state { color:#82d7a6; }
+#recording-status[data-state="error"] #recording-state,
+#recording-status[data-discarded="true"] #recording-discard { color:#ffc477; font-weight:700; }
+#recording-episode { color:#9aacc5; }
 fieldset { min-width:0; border:1px solid #34465d; border-radius:10px; padding:8px 10px; margin:0; }
 #cameras { display:flex; flex-wrap:wrap; gap:6px; }
 .camera { display:flex; align-items:center; gap:8px; background:#203044;
@@ -59,14 +72,13 @@ select { color:#e5edf7; background:#203044; border:1px solid #547192; border-rad
 .view-card.offline canvas, #preview.offline canvas { opacity:.3; }
 small { grid-row:6; color:#9aacc5; font-size:11px; white-space:nowrap;
   overflow:hidden; text-overflow:ellipsis; }
-.viewer-expanded main { padding:0; }
-.viewer-expanded header { position:fixed; bottom:8px; right:12px; z-index:2; }
+.viewer-expanded main { padding:6px; grid-template-columns:minmax(0,1fr) auto;
+  grid-template-rows:minmax(0,1fr) auto; }
+.viewer-expanded header { grid-row:2; grid-column:2; align-self:end; }
 .viewer-expanded header h1, .viewer-expanded #source,
 .viewer-expanded fieldset, .viewer-expanded small { display:none; }
-.viewer-expanded #preview { position:fixed; inset:0 0 44px; width:100%; height:calc(100vh - 44px);
-  height:calc(100dvh - 44px); padding:6px; background:#080c12; z-index:1; }
-.viewer-expanded #status { position:fixed; bottom:8px; left:12px; z-index:2;
-  max-width:calc(100% - 180px); padding:6px 10px; border-radius:6px; background:#10151ee6; }
+.viewer-expanded #preview { grid-row:1; grid-column:1 / -1; }
+.viewer-expanded #session-status { grid-row:2; grid-column:1; }
 @media (max-height:500px), (max-width:600px) {
   main { padding:6px 8px; gap:4px; }
   h1 { font-size:17px; }
@@ -81,7 +93,12 @@ small { grid-row:6; color:#9aacc5; font-size:11px; white-space:nowrap;
 <main><header><h1>SONIC Camera Preview</h1>
 <button id="expand-view" type="button" aria-pressed="false" disabled>Expand view</button></header>
 <div id="source"></div>
+<div id="session-status">
 <div id="status" role="status">Waiting for camera frames...</div>
+<div id="recording-status" data-state="unavailable" role="status"
+  title="Left Grip + A: start/stop recording. Left Grip + B: discard the current episode.">
+<strong id="recording-state">Recording: unknown</strong><span id="recording-episode"></span>
+<span id="recording-discard">Discarded: unknown</span></div></div>
 <fieldset><legend>Camera views</legend>
 <button id="select-all" type="button">Select all</button>
 <button id="select-none" type="button">Clear selection</button>
@@ -268,8 +285,31 @@ function choose(names) {
 }
 document.getElementById('select-all').onclick = () => choose(null);
 document.getElementById('select-none').onclick = () => choose([]);
+function renderRecording(status) {
+  const available = status?.available === true;
+  const state = available ? status.state : 'unavailable';
+  const panel = document.getElementById('recording-status');
+  panel.dataset.state = state;
+  panel.dataset.discarded = String(available && status.discarded === true);
+  const labels = {recording:'REC - Recording', saving:'Saving...', idle:'Not recording',
+    error:'Save failed', unavailable:'Recording: unknown'};
+  document.getElementById('recording-state').textContent = labels[state] || labels.unavailable;
+  const hasEpisode = available && Number.isInteger(status.episode_index);
+  const episode = document.getElementById('recording-episode');
+  const suffix = status?.result === 'saved' ? ' - saved' : status?.result === 'empty' ? ' - no frames' : '';
+  episode.textContent = hasEpisode
+    ? (state === 'idle' ? 'Last episode #' : 'Episode #') + status.episode_index + suffix : '';
+  episode.title = available ? (status.dataset || '') : '';
+  const discarded = document.getElementById('recording-discard');
+  discarded.textContent = !available ? 'Discarded: unknown' : !hasEpisode ? 'Discarded: --'
+    : status.discarded ? 'Discarded: Yes' : 'Discarded: No';
+  const reasons = {operator:'Marked by Left Grip + B / keyboard x',
+    hand_fault:'Marked by Inspire hand fault', shutdown:'Marked on exporter shutdown'};
+  discarded.title = available ? (reasons[status.discard_reason] || '') : '';
+}
 function render() {
   if (!latest) return;
+  renderRecording(latest.recording);
   const selected = latest.cameras.filter(camera => selection === null || selection.includes(camera.name));
   const names = selected.map(camera => camera.name);
   const ordered = orderedNames(names);
@@ -367,6 +407,7 @@ async function update() {
     }
     render();
   } catch (error) {
+    renderRecording(null);
     document.getElementById('status').textContent = 'Preview server disconnected. Retrying...';
     preview.classList.add('offline');
     streaming = false;
@@ -530,8 +571,11 @@ class CameraRelay:
 class CameraWebServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, relay):
+    def __init__(self, address, relay, recording_status_file=None):
         self.relay = relay
+        self.recording_status_file = recording_status_file or default_recording_status_path(
+            relay.camera_host, relay.camera_port
+        )
         super().__init__(address, CameraWebHandler)
 
 
@@ -545,7 +589,9 @@ class CameraWebHandler(BaseHTTPRequestHandler):
             if path == "/":
                 self._respond(PAGE, "text/html; charset=utf-8")
             elif path == "/status":
-                self._respond(json.dumps(self.server.relay.status()).encode(), "application/json")
+                status = self.server.relay.status()
+                status["recording"] = read_recording_status(self.server.recording_status_file)
+                self._respond(json.dumps(status).encode(), "application/json")
             elif path == "/stream":
                 self._stream()
             else:

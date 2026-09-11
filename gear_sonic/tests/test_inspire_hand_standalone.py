@@ -7,7 +7,7 @@ import unittest
 from inspire_rh56e2 import HandClient
 from gear_sonic.scripts.test_inspire_hand import main, run_session
 from gear_sonic.tests.test_inspire_hand_controller import FakeDevice
-from gear_sonic.utils.teleop.inspire_hand_controller import acquire_hand_lock
+from gear_sonic.utils.teleop.inspire_hand_controller import HAND_FORCE, OPEN_FINGER_ANGLE, acquire_hand_lock
 
 
 class StandaloneTests(unittest.TestCase):
@@ -50,9 +50,9 @@ class StandaloneTests(unittest.TestCase):
 
     def test_open_close_values_dedup_and_actual_feedback(self):
         self.assertEqual(self.run_commands(["0", "0", "s", "1", "q"]), 0)
-        self.assertEqual(self.device.angles_sent, [[1000,1000,1000,1000,1000,339],
+        self.assertEqual(self.device.angles_sent, [[OPEN_FINGER_ANGLE]*4+[1000,339],
                                                   [250,250,250,250,300,339]])
-        self.assertEqual(self.device.writes[:2], [(1498, [200]*6), (1522, [200]*6)])
+        self.assertEqual(self.device.writes[:2], [(1498, [HAND_FORCE]*6), (1522, [200]*6)])
         self.assertTrue(any("[500, 500, 500, 500, 500, 500]" in line for line in self.output))
         self.assertTrue(any("不表示实际运动到位" in line for line in self.output))
         self.assertEqual(self.device.max_active, 1)

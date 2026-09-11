@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from inspire_rh56e2 import HandClient
 from gear_sonic.utils.teleop.inspire_hand_controller import (
-    ANGLES, CLOSE_ANGLES, InspireHandController, PicoHandBridge, ThumbButtonGesture, ThumbRotationConfig,
+    ANGLES, CLOSE_ANGLES, HAND_FORCE, OPEN_FINGER_ANGLE, InspireHandController, PicoHandBridge, ThumbButtonGesture, ThumbRotationConfig,
     THUMB_HOLD_DELAY, validate_close_angles,
 )
 from gear_sonic.utils.data_collection.inspire_hand import hand_features, snapshot_to_frame, validate_snapshot
@@ -136,11 +136,11 @@ class ControllerTests(unittest.TestCase):
         self.hold(0, 1)
         self.hold(0, 1)
         self.assertEqual(self.left.angles_sent, [[250,250,250,250,300,339],
-                                                [1000,1000,1000,1000,1000,339]])
+                                                [OPEN_FINGER_ANGLE]*4+[1000,339]])
         self.assertEqual(self.right.angles_sent, [[250,250,250,250,300,339]])
         for d in (self.left, self.right):
             for start in range(0, len(d.writes), 3):
-                self.assertEqual(d.writes[start:start+2], [(1498, [200]*6), (1522, [200]*6)])
+                self.assertEqual(d.writes[start:start+2], [(1498, [HAND_FORCE]*6), (1522, [200]*6)])
             self.assertEqual(d.max_active, 1)
 
     def test_threshold_is_strictly_greater_than_one_half(self):
@@ -244,7 +244,7 @@ class ControllerTests(unittest.TestCase):
         self.update(1, 0, active=False)
         self.left.write_gate.set()
         self.wait(lambda: self.hands.snapshot()['hands'][0]['write_status'] == 5)
-        self.assertEqual(self.left.writes, [(1498, [200]*6)])
+        self.assertEqual(self.left.writes, [(1498, [HAND_FORCE]*6)])
         self.assertGreater(self.hands.snapshot()['hands'][0]['fault_count'], 0)
 
     def test_target_and_measured_feedback_are_distinct_and_frame_schema(self):
@@ -612,7 +612,7 @@ class ControllerTests(unittest.TestCase):
             self.assertGreaterEqual(len(targets),2)
             self.assertTrue(all(b-a==delta for a,b in zip([339]+targets,targets)))
             # Hold rate is independent of the short-click step (50 here).
-            self.assertEqual(device.writes[:2],[(1498,[200]*6),(1522,[200]*6)])
+            self.assertEqual(device.writes[:2],[(1498,[HAND_FORCE]*6),(1522,[200]*6)])
             self.assertEqual(sum(address==1498 for address,_ in device.writes),1)
             self.assertEqual(device.max_active,1)
 

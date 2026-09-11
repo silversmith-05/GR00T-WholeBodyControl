@@ -479,6 +479,15 @@ There are two ways to control recording: **PICO VR controllers** (recommended du
 
 These buttons work in any manager mode (POSE, PLANNER, etc.) and are independent of the mode-switching controls.
 
+The browser preview shows the exporter's actual recording state and episode
+index, including in **Expand view**. **REC - Recording** means the exporter is in
+recording mode; **Saving...** means recording has stopped and the episode is being
+written. After **Left Grip + B**, **Discarded: Yes** remains visible for the last
+episode until the next recording starts. Starting a new episode resets that
+indicator. Inspire hand faults that flag an episode for discard are also shown;
+hover over the discard indicator to see the reason. **Save failed** indicates an
+export error, rather than successful completion.
+
 **Keyboard over ZMQ:**
 
 | Key | Action |
@@ -587,6 +596,19 @@ It provides `/stream` (MJPEG) and `/status` (JSON) as well as the preview page.
 Direct MJPEG clients can select views with repeated `camera` query parameters,
 for example `/stream?camera=ego_view&camera=left_wrist`. Omit them to show all views.
 
+Recording status updates about once a second for all browsers and comes from the
+exporter, rather than inferring state from controller button presses. The exporter
+and relay share a small local heartbeat file keyed by the camera host/port and OS
+user. Existing all-in-one launch commands require no extra options. A standalone
+relay on the same workstation also detects the exporter when both use the same
+`--camera-host` and `--camera-port`. To use a custom file, pass the same
+`--recording-status-file /path/to/status.json` to `run_data_exporter.py` and
+`run_camera_web.py`. This file carries status only and is independent of datasets.
+**Recording: unknown** / **Discarded: unknown** means the exporter is unavailable,
+the status heartbeat is older than three seconds, or the preview connection was
+lost. A standalone camera preview without an exporter shows this unknown state.
+Restart both the exporter and browser relay after installing this update.
+
 If a standalone relay is already using port 8080, launch data collection with
 `--no-camera-web` to use that relay, or choose another `--camera-web-port` for a
 separate instance. `--no-camera-viewer` disables only the OpenCV window and leaves
@@ -616,6 +638,7 @@ Key options:
 | `--state-zmq-host` | `localhost` | Robot state publisher host |
 | `--state-zmq-port` | `5557` | Robot state publisher port |
 | `--root-output-dir` | `outputs` | Root directory for saved datasets |
+| `--recording-status-file` | *(local file per camera source)* | Shared recording status file for browser preview |
 | `--text-to-speech / --no-text-to-speech` | `True` | Voice feedback via espeak |
 
 ---

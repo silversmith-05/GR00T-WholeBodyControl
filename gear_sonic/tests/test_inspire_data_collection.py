@@ -20,6 +20,7 @@ from gear_sonic.data.features_sonic_vla import (
 from gear_sonic.data.exporter import Gr00tDataExporter, TypedLeRobotDataset
 from gear_sonic.scripts.run_data_exporter import GrootDataCollector, SonicDataExporterConfig, validate_existing_dataset
 from gear_sonic.scripts.launch_data_collection import DataCollectionLaunchConfig, hand_launch_arguments
+from gear_sonic.utils.teleop.inspire_hand_controller import OPEN_FINGER_ANGLE
 
 
 def feedback(close_angles=CLOSE_ANGLES):
@@ -34,7 +35,7 @@ def feedback(close_angles=CLOSE_ANGLES):
                     thumb_rotation=339+target*10, write_thumb_rotation=339+target*10,
                     thumb_step=10+target*10, thumb_min=0, thumb_max=1000)
         hand.update(close_angles=list(close_angles), thumb_hold_rate=20.0,
-                    angle_target=[*(close_angles if target else (1000,)*5),339+target*10])
+                    angle_target=[*(close_angles if target else (OPEN_FINGER_ANGLE,)*4+(1000,)),339+target*10])
         hand.update({key: True for key in ('connected','input_valid','target_valid','armed',
                                           'angle_valid','write_current','at_target_valid','thumb_target_valid')})
         hands.append(hand)
@@ -66,6 +67,7 @@ class DataTests(unittest.TestCase):
         c._finalize_frame = lambda _: True
         c._log_latency_periodic = lambda _: None
         c.data_exporter = Mock()
+        c.data_exporter.episode_buffer = {"episode_index": 0, "size": 2}
         c.data_exporter.features = get_features_sonic_vla(self.robot, backend)
         return c
 
@@ -159,7 +161,7 @@ class DataTests(unittest.TestCase):
         old_dataset.meta = Mock(info={'script_config': {'hand': old_metadata}})
         with self.assertRaisesRegex(ValueError, 'older/different hand action schema'):
             old_dataset.load_hf_dataset()
-        self.assertEqual(HAND_METADATA['release'], [1000,1000,1000,1000,1000,339])
+        self.assertEqual(HAND_METADATA['release'], [OPEN_FINGER_ANGLE]*4+[1000,339])
         self.assertEqual(HAND_METADATA['close'], [250,250,250,250,300,339])
 
     def test_fault_latches_even_when_next_feedback_recovers(self):
@@ -286,7 +288,7 @@ class DataTests(unittest.TestCase):
             self.assertEqual(dataset.hf_dataset[0]['hand.thumb_step'].tolist(), [10,20])
             self.assertEqual(dataset.hf_dataset[0]['hand.thumb_hold_rate'].tolist(), [20,20])
             self.assertEqual(dataset.hf_dataset[0]['hand.close_angles'].tolist(), list(custom)*2)
-            self.assertEqual(dataset.hf_dataset[0]['hand.angle_target'].tolist(), [1000]*5+[339]+list(custom)+[349])
+            self.assertEqual(dataset.hf_dataset[0]['hand.angle_target'].tolist(), [OPEN_FINGER_ANGLE]*4+[1000,339]+list(custom)+[349])
             self.assertTrue(dataset.hf_dataset[0]['hand.training_valid'].item())
 
     def test_thumb_validity_and_write_result_are_required_for_training(self):
