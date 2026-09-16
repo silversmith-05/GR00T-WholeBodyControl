@@ -46,7 +46,7 @@ class DeployLaunchTests(unittest.TestCase):
         path.write_text("#!/bin/bash\nset -e\n" + body)
         path.chmod(0o755)
 
-    def run_deploy(self, args):
+    def run_deploy(self, args, expect_failure=False):
         captured = self.root / "arguments.bin"
         captured.unlink(missing_ok=True)
         result = subprocess.run(
@@ -55,6 +55,10 @@ class DeployLaunchTests(unittest.TestCase):
             env={**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}",
                  "TensorRT_ROOT": str(self.root), "DEPLOY_TEST_ARGS": str(captured)},
         )
+        if expect_failure:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(captured.exists())
+            return result
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(captured.exists(), result.stdout + result.stderr)
         return captured.read_bytes().decode().split("\0")[:-1]
@@ -85,7 +89,9 @@ class DeployLaunchTests(unittest.TestCase):
                 self.assertEqual(deploy.count(mode), 1)
                 actual = self.run_deploy(deploy[deploy.index("./deploy.sh") + 1:])
                 self.assertEqual(actual[:3], ["run", "g1_deploy_onnx_ref", "lo" if sim else "test0"])
-                expected = ["--disable-dex3-hands"] if backend == "inspire" else []
+                expected = ["--zmq-port", "5556", "--zmq-out-port", "5557"]
+                if backend == "inspire":
+                    expected += ["--disable-dex3-hands"]
                 if sim:
                     expected += ["--disable-crc-check"]
                 if gains:
@@ -103,21 +109,53 @@ class DeployLaunchTests(unittest.TestCase):
             "--motor-kp-scale", "11-12=1.2", "--motor-kd-scale", "4-5=0.8", "sim",
         ])
         self.assertEqual(actual[actual.index("--zmq-host") + 2:], [
+            "--zmq-port", "5556", "--zmq-out-port", "5557",
             "--disable-dex3-hands", "--disable-crc-check",
             "--motor-kp-scale", "4,10=1.5", "--motor-kp-scale", "11-12=1.2",
             "--motor-kd-scale", "4-5=0.8",
         ])
+
+    def test_collection_only_arms_output_reaches_shell_and_binary_with_hands_and_gains(self):
+        binary = self.root / "target/release/g1_deploy_onnx_ref"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"--only-arms-output")
+        config = launcher.DataCollectionLaunchConfig(
+            deploy_only_arms_output=True, hand_backend="inspire", enable_hand_control=True,
+            deploy_motor_kp_scale="0-14=2", camera_web=False, camera_viewer=False,
+        )
+        commands = self.launch_commands(config)
+        deploy = next(command for command in commands if "./deploy.sh" in command)
+        actual = self.run_deploy(deploy[deploy.index("./deploy.sh") + 1:])
+        self.assertEqual(actual[actual.index("--zmq-host") + 2:], [
+            "--zmq-port", "5556", "--zmq-out-port", "5557",
+            "--disable-dex3-hands", "--only-arms-output", "--motor-kp-scale", "0-14=2",
+        ])
+        teleop = next(command for command in commands
+                      if "gear_sonic/scripts/pico_manager_thread_server.py" in command)
+        self.assertIn("--enable-hand-control", teleop)
+        self.assertNotIn("--only-arms-output", teleop)
+
+    def test_only_arms_output_shell_refuses_missing_or_old_binary(self):
+        result = self.run_deploy(["--only-arms-output", "sim"], expect_failure=True)
+        self.assertIn("rebuild g1_deploy_onnx_ref with --only-arms-output", result.stderr)
+        binary = self.root / "target/release/g1_deploy_onnx_ref"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"old binary --disable-dex3-hands")
+        result = self.run_deploy(["--only-arms-output", "sim"], expect_failure=True)
+        self.assertIn("rebuild g1_deploy_onnx_ref with --only-arms-output", result.stderr)
 
     def test_cli_accepts_upstream_gains_with_inspire_and_camera_options(self):
         config = tyro.cli(launcher.DataCollectionLaunchConfig, args=[
             "--deploy-motor-kp-scale", "4,10=1.5", "--deploy-motor-kd-scale", "4-5=0.8",
             "--hand-backend", "inspire", "--enable-hand-control", "--sim",
             "--camera-web-port", "8090", "--inspire-left-thumb-step", "5",
+            "--deploy-only-arms-output",
         ])
         self.assertEqual((config.deploy_motor_kp_scale, config.deploy_motor_kd_scale),
                          ("4,10=1.5", "4-5=0.8"))
         self.assertEqual((config.hand_backend, config.inspire_left_thumb_step), ("inspire", 5))
         self.assertTrue(config.enable_hand_control)
+        self.assertTrue(config.deploy_only_arms_output)
         self.assertTrue(config.sim)
         self.assertTrue(config.camera_web)
         self.assertEqual(config.camera_web_port, 8090)

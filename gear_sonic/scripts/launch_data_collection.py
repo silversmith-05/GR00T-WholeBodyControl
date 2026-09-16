@@ -119,6 +119,9 @@ class DataCollectionLaunchConfig:
     deploy_motor_kd_scale: str = ""
     """Kd scale specification for hardware motor indices (for example, 4,10=1.5)."""
 
+    deploy_only_arms_output: bool = False
+    """Enable only arm motors 15-28, with legs/waist disabled even during init/stop. Suspend the robot."""
+
     hand_backend: str = "dex3"
     """Hand backend: dex3 (legacy) or inspire (RH56E2-T1)."""
 
@@ -227,6 +230,10 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
             f"gear_sonic_deploy/deploy.sh not found at {deploy_dir}. "
             "Ensure the deploy directory is set up."
         )
+    if config.deploy_only_arms_output:
+        binary = deploy_dir / "target/release/g1_deploy_onnx_ref"
+        if not binary.is_file() or b"--only-arms-output" not in binary.read_bytes():
+            errors.append("Rebuild g1_deploy_onnx_ref with --only-arms-output support before collection")
 
     if config.sim and not (repo_root / ".venv_sim" / "bin" / "activate").exists():
         errors.append(
@@ -477,6 +484,8 @@ def main(config: DataCollectionLaunchConfig):
         deploy_cmd += f"--motor-kp-scale {config.deploy_motor_kp_scale} "
     if config.deploy_motor_kd_scale:
         deploy_cmd += f"--motor-kd-scale {config.deploy_motor_kd_scale} "
+    if config.deploy_only_arms_output:
+        deploy_cmd += "--only-arms-output "
     deploy_cmd += shlex.join(hand_deploy_args) + " " + deploy_mode
 
     print("Starting C++ deploy (pane 0)...")

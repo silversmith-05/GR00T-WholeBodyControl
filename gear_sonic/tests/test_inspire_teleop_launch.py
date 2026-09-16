@@ -44,6 +44,7 @@ class InspireTeleopLaunchTests(unittest.TestCase):
         self.assertEqual(list(commands), ["deploy", "teleop"])
         deploy, teleop = commands["deploy"], commands["teleop"]
         self.assertIn("--disable-dex3-hands", deploy)
+        self.assertNotIn("--only-arms-output", deploy)
         self.assertEqual(self.option(deploy, "--input-type"), "zmq_manager")
         self.assertEqual(self.option(deploy, "--output-type"), "zmq")
         self.assertEqual(deploy[-1], "real")
@@ -76,6 +77,34 @@ class InspireTeleopLaunchTests(unittest.TestCase):
         self.assertNotIn("--enable-hand-control", commands["teleop"])
         self.assertIn("--disable-dex3-hands", commands["deploy"])
 
+    def test_only_arms_output_reaches_body_deploy_and_preserves_inspire_control(self):
+        commands = self.run_standins(["--only-arms-output"])
+        self.assertIn("--only-arms-output", commands["deploy"])
+        self.assertIn("--disable-dex3-hands", commands["deploy"])
+        self.assertIn("--enable-hand-control", commands["teleop"])
+        self.assertNotIn("--only-arms-output", commands["teleop"])
+        commands = self.run_standins(["--component", "deploy", "--only-arms-output",
+                                     "--teleop-host", "192.168.3.2"])
+        self.assertIn("--only-arms-output", commands["deploy"])
+
+    def test_only_arms_output_rejects_old_binary_before_starting_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deploy = root / "gear_sonic_deploy"
+            deploy.mkdir()
+            (deploy / "deploy.sh").touch()
+            binary = deploy / "target/release/g1_deploy_onnx_ref"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"--disable-dex3-hands")
+            args = launcher.parse_args(["--component", "deploy", "--only-arms-output"])
+            with patch.object(launcher.shutil, "which", return_value="tmux"), \
+                    patch.object(launcher.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "does not support --only-arms-output"):
+                    launcher.check_prerequisites(args, root)
+                binary.write_bytes(b"--disable-dex3-hands --only-arms-output")
+                launcher.check_prerequisites(args, root)
+                run.assert_not_called()
+
     def test_split_components_use_explicit_remote_addresses(self):
         commands = self.run_standins(["--component", "deploy", "--teleop-host", "192.168.3.2"])
         self.assertEqual(list(commands), ["deploy"])
@@ -89,6 +118,7 @@ class InspireTeleopLaunchTests(unittest.TestCase):
                      ["--inspire-left-ip", "192.168.123.210"], ["--session", "bad;name"],
                      ["--inspire-left-thumb-hold-rate", "51"],
                      ["--inspire-close-angles", "1000", "250", "250", "250", "300"],
+                     ["--component", "teleop", "--only-arms-output"],
                      ["--teleop-host", "192.168.3.2"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()), \
                     patch.object(launcher.subprocess, "run") as run:

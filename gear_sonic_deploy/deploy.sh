@@ -216,6 +216,7 @@ show_usage() {
     echo "  --motor-kp-scale SPEC   Scale Kp for hardware motor indices/ranges"
     echo "  --motor-kd-scale SPEC   Scale Kd for hardware motor indices/ranges"
     echo "  --disable-dex3-hands    Disable legacy hand driver (required for Inspire)"
+    echo "  --only-arms-output     Enable only arm motors 15-28; disable legs/waist (suspended robot)"
     echo ""
     echo "Interface modes:"
     echo "  sim              Use loopback interface for simulation (MuJoCo)"
@@ -262,10 +263,15 @@ MOTOR_KP_SCALES=()
 MOTOR_KD_SCALES=()
 
 DISABLE_DEX3_HANDS=false
+ONLY_ARMS_OUTPUT=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --only-arms-output)
+            ONLY_ARMS_OUTPUT=true
+            shift
+            ;;
         --disable-dex3-hands)
             DISABLE_DEX3_HANDS=true
             shift
@@ -429,6 +435,9 @@ EXTRA_ARGS=(--zmq-port "$ZMQ_PORT" --zmq-out-port "$ZMQ_OUT_PORT")
 if [[ "$DISABLE_DEX3_HANDS" == true ]]; then
     EXTRA_ARGS+=("--disable-dex3-hands")
 fi
+if [[ "$ONLY_ARMS_OUTPUT" == true ]]; then
+    EXTRA_ARGS+=("--only-arms-output")
+fi
 if [[ "$ENV_TYPE" == "sim" ]]; then
     EXTRA_ARGS+=("--disable-crc-check")
     echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
@@ -547,6 +556,14 @@ set -e  # Re-enable exit on error
 echo "Building the project..."
 just build
 
+# Older binaries ignore unknown flags. Never allow an only-arms-output request to
+# silently launch full-body control if a build left an incompatible executable.
+if [[ "$ONLY_ARMS_OUTPUT" == true ]] &&
+   ! grep -aq -- '--only-arms-output' target/release/g1_deploy_onnx_ref; then
+    echo "Error: rebuild g1_deploy_onnx_ref with --only-arms-output support before deployment." >&2
+    exit 1
+fi
+
 echo ""
 
 # ============================================================================
@@ -568,6 +585,12 @@ echo -e "  Obs Config:         ${GREEN}$OBS_CONFIG${NC}"
 echo -e "  Planner:            ${GREEN}$PLANNER${NC}"
 echo -e "  Input Type:         ${GREEN}$INPUT_TYPE${NC}"
 echo -e "  Output Type:        ${GREEN}$OUTPUT_TYPE${NC}"
+if [[ "$ONLY_ARMS_OUTPUT" == true ]]; then
+    echo "  Body Motor Output:  only-arms-output (15-28); legs/waist 0-14 disabled during init/control/stop"
+    echo "  Support:            Keep robot suspended; legs/waist have no support or damping"
+else
+    echo "  Body Motor Output:  FULL BODY (0-28)"
+fi
 echo -e "  ZMQ Host:           ${GREEN}$ZMQ_HOST${NC}"
 if (( ${#EXTRA_ARGS[@]} > 0 )); then
 printf -v EXTRA_ARGS_DISPLAY ' %q' "${EXTRA_ARGS[@]}"

@@ -29,6 +29,51 @@ cd /home/unitree/GR00T-WholeBodyControl
 
 身体启停和模式切换沿用 Pico manager：首次 `A+B+X+Y` 启动，`A+X` 切到全身 POSE；运行中 `A+B+X+Y` 停控。因时手沿用现有逻辑：进入允许的模式后先松开 trigger 和面键建立基线，再按 trigger 闭合、松开放开。左手 X/Y、右手 A/B 调整拇指旋转，单击和长按规则详见 [因时手控制说明](inspire_hand_data_collection.md#左右拇指旋转操作)。
 
+## 吊装双臂模式
+
+新增可选 `--only-arms-output`；不传时仍为原全身控制。先在实际运行 C++ deploy 的机器上更新源码并重新编译（NX 上需本机编译，不能复制工作站的 x86 二进制）：
+
+```bash
+cmake --build gear_sonic_deploy/build --target g1_deploy_onnx_ref -j2
+./start_inspire_teleop.sh --only-arms-output --check
+./start_inspire_teleop.sh --only-arms-output --dry-run
+
+# 完成吊装后启动；也可在参数中指定 eth0 等网卡
+./start_inspire_teleop.sh --only-arms-output
+```
+
+`--check` 和 `--dry-run` 不连接设备。启动器在创建会话前检查二进制是否支持新开关；`deploy.sh` 也会在构建后检查，避免旧程序忽略参数而运行全身控制。运行时 deploy 会打印 `Body motor output: only-arms-output`。分机使用时把参数传给 `--component deploy`；单独的 `--component teleop` 不接受该参数。
+
+| 硬件索引 | 部位 | 双臂模式下的下发 |
+| --- | --- | --- |
+| 0–11 | 双腿 | `mode=0`，`q/dq/tau/kp/kd=0` |
+| 12–14 | 腰 | `mode=0`，`q/dq/tau/kp/kd=0` |
+| 15–21 | 左臂，含腕关节 | 保留原控制 |
+| 22–28 | 右臂，含腕关节 | 保留原控制 |
+| 独立手部连接 | 左右因时手 | 保留原 Pico 控制 |
+
+身体下发路径是 `Pico manager → ZMQ → C++ SONIC 策略（50 Hz）→ MotorCommand 缓冲 → LowCommandWriter（500 Hz）→ DDS rt/lowcmd`。屏蔽在 `motor_output.hpp::pack_motor_commands()` 实施，每条 DDS 消息在计算 CRC 前处理，覆盖初始化插值、等待启动、正常控制和退出阻尼。即使上游仍为腿腰计算目标、设置非零增益，腿腰也只会收到禁用且各字段清零的命令。DDS 仍发布完整包，“不输出”指禁用对应电机，不是停止发整包。关节状态订阅保持原样。
+
+因时手走 `Pico → InspireHandController → SDK/Modbus TCP`，不经过上述身体输出；C++ 的 Dex3 仍禁用。`--read-only-hands` 可额外关闭因时手写入。
+
+此模式按机器人吊装使用：腿腰无位置保持、无主动支撑、无退出阻尼。双臂仍会执行原有约 3 秒初始化插值，启停和 POSE 切换按原按键流程进行。SONIC 仍读取全身状态并运行原全身策略；本改动没有把双臂改为独立 IK，吊装姿态下的跟随质量尚需实机验证。
+
+### 记录数据
+
+`start_inspire_teleop.sh` 本身仍不启动记录。需要采集时，在原 `launch_data_collection.py` 命令中增加 `--deploy-only-arms-output`，例如（相机地址按现场设置）：
+
+```bash
+.venv_data_collection/bin/python gear_sonic/scripts/launch_data_collection.py \
+  --deploy-only-arms-output \
+  --hand-backend inspire --enable-hand-control \
+  --camera-host 192.168.123.164 --record-wrist-cameras \
+  --task-prompt "pick up the ball" --dataset-name only_arms_output_ball
+```
+
+采集启动器会自行启动 deploy 和 teleop，应先按原停控流程退出此前的遥操作会话，避免重复控制进程。`start_wired_real.sh` 当前不转发命令行参数；如使用该脚本，请把 `--deploy-only-arms-output` 加入脚本内的 Python 参数列表。
+
+采集格式不变：`observation.state` / `action.wbc` 仍是 29 维；腿腰实测状态仍记录，但 `action.wbc` 的腿腰部分是策略输出，**没有下发执行**。新建单独数据集，并在双臂训练时按关节名称选择左右臂各 7 维，不能把腿腰动作列当成已执行示范。数据集的 RobotModel 顺序与 DDS 硬件索引不应混用，不能直接假定数据集切片也是 `[15:29]`。因时手的 `action.hand` 和 `action.thumb_rotation` 保留原语义。本开关不自动裁剪数据维度，也不添加采集格式字段。
+
 ## 默认参数与覆盖
 
 | 项目 | 默认值 |

@@ -104,6 +104,7 @@
 #include "../include/robot_parameters.hpp"
 #include "../include/policy_parameters.hpp"
 #include "../include/motor_gain_scaling.hpp"
+#include "../include/motor_output.hpp"
 
 // Input interface and input handlers
 #include "../include/input_interface/keyboard_handler.hpp"
@@ -300,6 +301,7 @@ class G1Deploy {
     static constexpr std::chrono::milliseconds LOW_STATE_ABSENT_THRESHOLD{500};
     ProgramState program_state_;
     MotorGainScaleConfig motor_gain_scales_;
+    const bool only_arms_output_;
     std::array<double, G1_NUM_MOTOR> last_action;
     std::array<double, 7> last_left_hand_action;
     std::array<double, 7> last_right_hand_action;
@@ -2166,7 +2168,8 @@ class G1Deploy {
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
       double initial_max_close_ratio = 1.0,
       MotorGainScaleConfig motor_gain_scales = {},
-      bool enable_dex3_hands = true)
+      bool enable_dex3_hands = true,
+      bool only_arms_output = false)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2179,6 +2182,7 @@ class G1Deploy {
         disable_crc_check_(disable_crc_check),
         program_state_(ProgramState::INIT),
         motor_gain_scales_(motor_gain_scales),
+        only_arms_output_(only_arms_output),
         last_action {0.0},
         last_left_hand_action {0.0},
         last_right_hand_action {0.0},
@@ -2189,6 +2193,13 @@ class G1Deploy {
         model_path(model_file_path),
         planner_path(planner_file_path) {
 
+      std::cout << "[INFO] Body motor output: "
+                << (only_arms_output_ ? "only-arms-output (15-28 enabled; legs/waist 0-14 disabled, including init/stop)"
+                               : "FULL BODY (0-28 enabled)") << std::endl;
+      if (only_arms_output_) {
+        std::cout << "[INFO] Keep the robot suspended: legs/waist provide no support or damping."
+                  << std::endl;
+      }
       const auto kp_scales = format_motor_gain_scales(motor_gain_scales_.kp);
       const auto kd_scales = format_motor_gain_scales(motor_gain_scales_.kd);
       if (!kp_scales.empty()) {
@@ -2687,14 +2698,7 @@ class G1Deploy {
 
       const std::shared_ptr<const MotorCommand> mc = motor_command_buffer_.GetDataWithTime().data;
       if (mc) {
-        for (size_t i = 0; i < G1_NUM_MOTOR; i++) {
-          dds_low_command.motor_cmd().at(i).mode() = 1; // 1:Enable, 0:Disable
-          dds_low_command.motor_cmd().at(i).tau() = mc->tau_ff.at(i);
-          dds_low_command.motor_cmd().at(i).q() = mc->q_target.at(i);
-          dds_low_command.motor_cmd().at(i).dq() = mc->dq_target.at(i);
-          dds_low_command.motor_cmd().at(i).kp() = mc->kp.at(i);
-          dds_low_command.motor_cmd().at(i).kd() = mc->kd.at(i);
-        }
+        pack_motor_commands(*mc, only_arms_output_, dds_low_command);
 
         dds_low_command.crc() = Crc32Core((uint32_t*)&dds_low_command, (sizeof(dds_low_command) >> 2) - 1);
         lowcmd_publisher_->Write(dds_low_command);
@@ -4163,6 +4167,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --policy-precision <16|32>: specify precision to run the policy model at (default: 32)" << std::endl;
     std::cout << "  --motor-kp-scale <motors>=<factor>: scale Kp for hardware motor indices/ranges" << std::endl;
     std::cout << "  --motor-kd-scale <motors>=<factor>: scale Kd for hardware motor indices/ranges" << std::endl;
+    std::cout << "  --only-arms-output: enable only arm motors 15-28; disable legs/waist even during init/stop (suspended robot)" << std::endl;
     std::cout << "  --zmq-host <host>: ZMQ server host (default: localhost)" << std::endl;
     std::cout << "  --zmq-port <port>: ZMQ server port (default: 5556)" << std::endl;
     std::cout << "  --zmq-topic <topic>: ZMQ topic/prefix (default: pose)" << std::endl;
@@ -4219,6 +4224,7 @@ int main(int argc, char const* argv[]) {
   bool zmq_conflate = false;  // default off; enable with --zmq-conflate
   bool zmq_verbose = false;
   bool enableDex3Hands = true;
+  bool onlyArmsOutput = false;
   bool enableMotionRecording = false;  // default off; enable with --enable-motion-recording
   int zmq_out_port = 5557;
   std::string zmq_out_topic = "g1_debug";
@@ -4377,6 +4383,8 @@ int main(int argc, char const* argv[]) {
       else{
         std::cerr << "old and weak" << std::endl;
       }
+    } else if (std::string(argv[i]) == "--only-arms-output") {
+      onlyArmsOutput = true;
     } else if (std::string(argv[i]) == "--motor-kp-scale") {
       if (!parse_motor_gain_scale_flag(argc, argv, i, motor_gain_scales.kp)) {
         return 1;
@@ -4498,7 +4506,8 @@ int main(int argc, char const* argv[]) {
     initial_compliance,
     initial_max_close_ratio,
     motor_gain_scales,
-    enableDex3Hands
+    enableDex3Hands,
+    onlyArmsOutput
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   

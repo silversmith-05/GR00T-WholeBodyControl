@@ -35,6 +35,8 @@ def parse_args(argv=None):
     parser.add_argument("--zmq-out-port", type=int, default=5557)
     parser.add_argument("--pico-input-source", choices=("xrt", "isaac-teleop"), default="xrt")
     parser.add_argument("--read-only-hands", action="store_true", help="Read hand feedback without hand writes")
+    parser.add_argument("--only-arms-output", action="store_true",
+                        help="Enable only arm motors 15-28; disable legs/waist during init/control/stop (robot must be suspended)")
     defaults = DataCollectionLaunchConfig()
     for name in ("inspire_left_ip", "inspire_right_ip", "inspire_port",
                  *[f"inspire_{side}_thumb_{setting}" for side in ("left", "right")
@@ -71,6 +73,8 @@ def parse_args(argv=None):
         if args.component == "both" and any(host not in {"localhost", "127.0.0.1"}
                                             for host in (args.teleop_host, args.state_host)):
             raise ValueError("Use --component deploy/teleop when the other component is on another machine")
+        if args.only_arms_output and args.component == "teleop":
+            raise ValueError("--only-arms-output must be set on the deploy component, which sends motor commands")
         # Reuse the same hand presets, bounds and argument validation as collection.
         hand_arguments(args)
     except ValueError as exc:
@@ -91,6 +95,8 @@ def build_commands(args, root=REPO):
     deploy = ["bash", str(root / "gear_sonic_deploy/deploy.sh"), "--input-type", "zmq_manager",
               "--output-type", "zmq", "--zmq-host", args.teleop_host,
               "--zmq-port", str(args.zmq_port), "--zmq-out-port", str(args.zmq_out_port), *deploy_hand]
+    if args.only_arms_output:
+        deploy.append("--only-arms-output")
     for name, flag in (("checkpoint", "--cp"), ("obs_config", "--obs-config"),
                        ("planner", "--planner"), ("motion_data", "--motion-data")):
         if getattr(args, name):
@@ -117,8 +123,12 @@ def check_prerequisites(args, root=REPO):
             if not (root / relative).is_file():
                 errors.append(f"Missing {root / relative}")
         binary = root / "gear_sonic_deploy/target/release/g1_deploy_onnx_ref"
-        if binary.is_file() and b"--disable-dex3-hands" not in binary.read_bytes():
-            errors.append("Rebuild g1_deploy_onnx_ref: this binary does not support --disable-dex3-hands")
+        if binary.is_file():
+            contents = binary.read_bytes()
+            required = ["--disable-dex3-hands"] + (["--only-arms-output"] if args.only_arms_output else [])
+            for flag in required:
+                if flag.encode() not in contents:
+                    errors.append(f"Rebuild g1_deploy_onnx_ref: this binary does not support {flag}")
     if args.component in ("both", "teleop"):
         python = root / ".venv_teleop/bin/python"
         if not python.is_file():
