@@ -162,6 +162,9 @@ class DataCollectionLaunchConfig:
     pico_waist_tracking: bool = False
     """Enable waist tracking on the teleop streamer."""
 
+    pico_only_arms_detect: bool = False
+    """Use original SMPL arm tracking with neutral legs/torso/root; planner stays IDLE and B+Y holds only arms."""
+
     # Data exporter options
     task_prompt: str = "demo"
     """Language task prompt for the data exporter."""
@@ -205,6 +208,14 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
     """Verify that required tools and venvs exist."""
     errors = []
 
+    if config.pico_only_arms_detect:
+        if config.deploy_only_arms_output:
+            errors.append("--pico-only-arms-detect cannot be combined with --deploy-only-arms-output")
+        if not config.pico_manager or config.deploy_input_type != "zmq_manager":
+            errors.append("--pico-only-arms-detect requires --pico-manager and --deploy-input-type zmq_manager")
+        if config.pico_waist_tracking:
+            errors.append("--pico-only-arms-detect cannot be combined with --pico-waist-tracking")
+
     if config.camera_web and not 1 <= config.camera_web_port <= 65535:
         errors.append("--camera-web-port must be in 1..65535")
 
@@ -234,6 +245,10 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
         binary = deploy_dir / "target/release/g1_deploy_onnx_ref"
         if not binary.is_file() or b"--only-arms-output" not in binary.read_bytes():
             errors.append("Rebuild g1_deploy_onnx_ref with --only-arms-output support before collection")
+    if config.pico_only_arms_detect:
+        binary = deploy_dir / "target/release/g1_deploy_onnx_ref"
+        if not binary.is_file() or b"arm_position" not in binary.read_bytes():
+            errors.append("Rebuild g1_deploy_onnx_ref with arm_position support before --pico-only-arms-detect collection")
 
     if config.sim and not (repo_root / ".venv_sim" / "bin" / "activate").exists():
         errors.append(
@@ -417,6 +432,8 @@ def main(config: DataCollectionLaunchConfig):
     print(f"  Deploy input:    {config.deploy_input_type}")
     print(f"  Hand backend:    {config.hand_backend}; Inspire writes={config.enable_hand_control}")
     print(f"  Teleop input:    {config.pico_input_source}")
+    if config.pico_only_arms_detect:
+        print("  Tracking:        only-arms-detect (SMPL arms, neutral legs/torso, full-body motor output)")
     if config.deploy_checkpoint:
         print(f"  Checkpoint:      {config.deploy_checkpoint}")
     print(f"  Camera:          {config.camera_host}:{config.camera_port}")
@@ -510,6 +527,8 @@ def main(config: DataCollectionLaunchConfig):
         pico_cmd += " --vis_smpl"
     if config.pico_waist_tracking:
         pico_cmd += " --waist_tracking"
+    if config.pico_only_arms_detect:
+        pico_cmd += " --only-arms-detect"
 
     print("Starting teleop streamer (pane 2)...")
     _send_to_pane(1, pico_cmd, wait=2.0)

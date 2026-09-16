@@ -62,6 +62,8 @@ struct CommandMessage {
  *   - height             : float – desired body height      (-1.0 = use default)
  *   - upper_body_position: float[17] – target upper-body joint positions  (radians)
  *   - upper_body_velocity: float[17] – target upper-body joint velocities (rad/s)
+ *   - arm_position       : float[14] – static arm targets, excludes waist;
+ *     mutually exclusive with upper_body_position/velocity
  *   - left_hand_joints   : float[7]  – Dex3 left-hand joint positions
  *   - right_hand_joints  : float[7]  – Dex3 right-hand joint positions
  *
@@ -83,7 +85,7 @@ struct PlannerMessage {
   std::array<double, 3> facing = {1.0, 0.0, 0.0};
 
   /// Optional upper-body joint target positions (17 DOF, radians).
-  /// Present when the remote controller provides whole-body commands.
+  /// Also marks arm_position availability (padded to upper-body order internally).
   std::optional<std::array<double, 17>> upper_body_position;
 
   /// Optional upper-body joint target velocities (17 DOF, rad/s).
@@ -105,4 +107,3 @@ struct PlannerMessage {
   /// Used to detect planner timeouts (stale data → fallback to IDLE).
   std::chrono::steady_clock::time_point timestamp{};
 };
-

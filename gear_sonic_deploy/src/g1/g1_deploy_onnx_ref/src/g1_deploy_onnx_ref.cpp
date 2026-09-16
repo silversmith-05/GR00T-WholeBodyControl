@@ -203,7 +203,7 @@ class G1Deploy {
     std::array<double, 7> left_hand_joint_buffer_;
     std::array<double, 7> right_hand_joint_buffer_;
     bool has_upper_body_data_ = false;
-    std::array<double, 17> upper_body_joint_positions_buffer_;
+    UpperBodyJointPositions upper_body_joint_positions_buffer_;
     std::array<double, 17> upper_body_joint_velocities_buffer_;
     std::vector<double> token_state_data_;  // Token buffer (size from config)
     
@@ -789,9 +789,7 @@ class G1Deploy {
             for (size_t i = 0; i < 29; i++) {
               current_motion_joint_pos[i] = motion_joint_pos[i];
             }
-            for (size_t i = 0; i < 17; i++) {
-              current_motion_joint_pos[upper_body_joint_isaaclab_order_in_isaaclab_index[i]] = upper_body_joint_positions_buffer_[i];
-            }
+            upper_body_joint_positions_buffer_.ApplyPositions(current_motion_joint_pos);
             std::copy(
               current_motion_joint_pos.begin(),
               current_motion_joint_pos.end(),
@@ -866,9 +864,8 @@ class G1Deploy {
               for (size_t i = 0; i < 29; i++) {
                 current_motion_joint_vel[i] = motion_joint_vel[i];
               }
-              for (size_t i = 0; i < 17; i++) {
-                current_motion_joint_vel[upper_body_joint_isaaclab_order_in_isaaclab_index[i]] = upper_body_joint_velocities_buffer_[i];
-              }
+              upper_body_joint_positions_buffer_.ApplyVelocities(
+                  current_motion_joint_vel, upper_body_joint_velocities_buffer_);
               std::copy(
                 current_motion_joint_vel.begin(),
                 current_motion_joint_vel.end(),

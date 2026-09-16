@@ -774,6 +774,7 @@ class ZMQManager : public InputInterface {
       int mode_idx = -1, movement_idx = -1, facing_idx = -1;
       int speed_idx = -1, height_idx = -1;
       int upper_body_position_idx = -1, upper_body_velocity_idx = -1;
+      int arm_position_idx = -1;
       int left_hand_joints_idx = -1, right_hand_joints_idx = -1;
       int vr_position_idx = -1, vr_orientation_idx = -1, vr_compliance_idx = -1;
 
@@ -786,6 +787,7 @@ class ZMQManager : public InputInterface {
         else if (f.name == "height") height_idx = static_cast<int>(i);
         else if (f.name == "upper_body_position") upper_body_position_idx = static_cast<int>(i);
         else if (f.name == "upper_body_velocity") upper_body_velocity_idx = static_cast<int>(i);
+        else if (f.name == "arm_position") arm_position_idx = static_cast<int>(i);
         else if (f.name == "left_hand_joints") left_hand_joints_idx = static_cast<int>(i);
         else if (f.name == "right_hand_joints") right_hand_joints_idx = static_cast<int>(i);
         else if (f.name == "vr_position") vr_position_idx = static_cast<int>(i);
@@ -882,35 +884,30 @@ class ZMQManager : public InputInterface {
         }
       }
 
-      // Optional: upper_body_position (17 DOF, decode based on dtype)
-      if (upper_body_position_idx >= 0) {
-        const auto& ub_pos_buf = bufs[upper_body_position_idx];
-        const auto& ub_pos_field = hdr.fields[upper_body_position_idx];
-
-        std::array<double, 17> upper_body_position_data{};
+      // Optional static arm hold excludes waist. Reject ambiguous mixed scopes.
+      if (arm_position_idx >= 0 && (upper_body_position_idx >= 0 || upper_body_velocity_idx >= 0)) {
+        std::cerr << "[ZMQManager] arm_position conflicts with upper_body_position/velocity" << std::endl;
+        return;
+      }
+      const bool arms_only = arm_position_idx >= 0;
+      const int position_idx = arms_only ? arm_position_idx : upper_body_position_idx;
+      if (position_idx >= 0) {
+        const auto& ub_pos_buf = bufs[position_idx];
+        const auto& ub_pos_field = hdr.fields[position_idx];
+        std::optional<UpperBodyJointPositions> targets;
         if (ub_pos_field.dtype == "f32") {
-          for (int i = 0; i < 17; ++i) {
-            float val;
-            std::memcpy(&val,
-                        static_cast<const uint8_t*>(ub_pos_buf.data) + i * sizeof(float),
-                        sizeof(float));
-            if (needs_swap) val = byte_swap(val);
-            upper_body_position_data[i] = static_cast<double>(val);
-          }
-        } else { // f64 or default
-          for (int i = 0; i < 17; ++i) {
-            double val;
-            std::memcpy(&val,
-                        static_cast<const uint8_t*>(ub_pos_buf.data) + i * sizeof(double),
-                        sizeof(double));
-            if (needs_swap) val = byte_swap(val);
-            upper_body_position_data[i] = val;
-          }
+          targets = DecodeUpperBodyJointPositions<float>(
+              ub_pos_buf.data, ub_pos_buf.size, needs_swap, arms_only);
+        } else if (ub_pos_field.dtype == "f64") {
+          targets = DecodeUpperBodyJointPositions<double>(
+              ub_pos_buf.data, ub_pos_buf.size, needs_swap, arms_only);
         }
-        msg.upper_body_position = upper_body_position_data;
-
-        // Push into upper-body position buffer
-        upper_body_joint_positions_.SetData(upper_body_position_data);
+        if (!targets) {
+          std::cerr << "[ZMQManager] Invalid " << ub_pos_field.name << " dtype or size" << std::endl;
+          return;
+        }
+        msg.upper_body_position = targets->positions;
+        upper_body_joint_positions_.SetData(*targets);
       }
 
       // Optional: upper_body_velocity (17 DOF, decode based on dtype)

@@ -74,6 +74,7 @@ def build_planner_message(
     vr_3pt_position: Sequence[float] | None = None,
     vr_3pt_orientation: Sequence[float] | None = None,
     vr_3pt_compliance: Sequence[float] | None = None,
+    arm_position: Sequence[float] | None = None,
 ) -> bytes:
     """
     Assemble a 'planner' topic message:
@@ -82,12 +83,19 @@ def build_planner_message(
       - facing: f32[3] (x,y,z)
       - speed: f32 (optional, -1 for default)
       - height: f32 (optional, -1 for default)
+      - arm_position: f32[14] (optional, interleaved left/right arm joints;
+        excludes waist, mutually exclusive with upper_body_position/velocity)
     Returns: bytes ready to send via socket.send()
     """
     if len(movement) != 3:
         raise ValueError("movement must have length 3")
     if len(facing) != 3:
         raise ValueError("facing must have length 3")
+    if arm_position is not None:
+        if len(arm_position) != 14:
+            raise ValueError("arm_position must have length 14")
+        if upper_body_position is not None or upper_body_velocity is not None:
+            raise ValueError("arm_position cannot be combined with upper_body_position/velocity")
 
     fields = [
         {"name": "mode", "dtype": "i32", "shape": [1]},
@@ -106,6 +114,11 @@ def build_planner_message(
             struct.pack("<f", float(height)),
         )
     )
+
+    if arm_position is not None:
+        fields.append({"name": "arm_position", "dtype": "f32", "shape": [14]})
+        for value in arm_position:
+            payload += struct.pack("<f", float(value))
 
     # Add upper body position and velocity to payload, optionally
     if upper_body_position is not None:

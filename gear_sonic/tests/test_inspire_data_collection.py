@@ -21,6 +21,7 @@ from gear_sonic.data.exporter import Gr00tDataExporter, TypedLeRobotDataset
 from gear_sonic.scripts.run_data_exporter import GrootDataCollector, SonicDataExporterConfig, validate_existing_dataset
 from gear_sonic.scripts.launch_data_collection import DataCollectionLaunchConfig, hand_launch_arguments
 from gear_sonic.utils.teleop.inspire_hand_controller import OPEN_FINGER_ANGLE
+from gear_sonic.utils.teleop.zmq.zmq_planner_sender import build_planner_message, pack_pose_message
 
 
 def feedback(close_angles=CLOSE_ANGLES):
@@ -113,6 +114,45 @@ class DataTests(unittest.TestCase):
         c._poll_sonic_zmq_messages()
         self.assertIsNone(c.latest_hand_msg)
         self.assertTrue(c._hand_episode_fault)
+
+    def test_arm_only_freeze_keeps_dataset_schema_and_actual_wbc_action(self):
+        c = self.collector()
+        c.current_stream_mode = 3
+        c._handle_planner_message(build_planner_message(
+            0, [0, 0, 0], [1, 0, 0], arm_position=np.linspace(-0.2, 0.2, 14)))
+        c._add_data_frame_sonic(time.monotonic())
+        frame = c.data_exporter.add_frame.call_args.args[0]
+        self.assertEqual(set(frame), set(c.data_exporter.features))
+        for key, spec in c.data_exporter.features.items():
+            self.assertEqual(tuple(frame[key].shape), tuple(spec["shape"]), key)
+        self.assertEqual(frame["teleop.stream_mode"].item(), 3)
+        self.assertEqual(frame["teleop.planner_mode"].item(), 0)
+        self.assertEqual(len(frame["observation.state"]), 29)
+        # Record real control feedback, never substitute the 14-D hold command.
+        np.testing.assert_array_equal(frame["action.wbc"], np.ones(29))
+
+    def test_smpl_arm_tracking_keeps_elbow_targets_and_original_dataset_schema(self):
+        c = self.collector()
+        c.sonic_timing_monitor = Mock()
+        c.current_stream_mode = 1
+        pose = np.zeros((2, 21, 3), dtype=np.float32)
+        pose[:, 17, 0] = .3  # Left elbow; lower body remains neutral.
+        joints = np.arange(144, dtype=np.float32).reshape(2, 24, 3) / 100
+        c._handle_pose_message(pack_pose_message({
+            "smpl_pose": pose, "smpl_joints": joints,
+            "body_quat_w": np.tile(np.array([1,0,0,0], dtype=np.float32), (2,1)),
+            "joint_pos": np.zeros((2, 29), dtype=np.float32),
+            "frame_index": np.array([2,3], dtype=np.int64),
+        }, topic="pose", version=3))
+        c._add_data_frame_sonic(time.monotonic())
+        frame = c.data_exporter.add_frame.call_args.args[0]
+        self.assertEqual(set(frame), set(c.data_exporter.features))
+        for key, spec in c.data_exporter.features.items():
+            self.assertEqual(tuple(frame[key].shape), tuple(spec["shape"]), key)
+        self.assertEqual(frame["teleop.stream_mode"].item(), 1)
+        np.testing.assert_array_equal(frame["teleop.smpl_pose"], pose[0].flatten())
+        np.testing.assert_array_equal(frame["teleop.smpl_joints"], joints[0].flatten())
+        np.testing.assert_array_equal(frame["action.wbc"], np.ones(29))
 
     def test_training_modality_and_camera_resume_checks(self):
         modality = get_modality_config_sonic_vla(self.robot, 'inspire')

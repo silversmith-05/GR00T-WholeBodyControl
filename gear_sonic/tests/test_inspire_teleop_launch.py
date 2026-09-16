@@ -45,6 +45,7 @@ class InspireTeleopLaunchTests(unittest.TestCase):
         deploy, teleop = commands["deploy"], commands["teleop"]
         self.assertIn("--disable-dex3-hands", deploy)
         self.assertNotIn("--only-arms-output", deploy)
+        self.assertNotIn("--only-arms-detect", teleop)
         self.assertEqual(self.option(deploy, "--input-type"), "zmq_manager")
         self.assertEqual(self.option(deploy, "--output-type"), "zmq")
         self.assertEqual(deploy[-1], "real")
@@ -87,6 +88,16 @@ class InspireTeleopLaunchTests(unittest.TestCase):
                                      "--teleop-host", "192.168.3.2"])
         self.assertIn("--only-arms-output", commands["deploy"])
 
+    def test_only_arms_detect_reaches_teleop_and_keeps_full_body_output(self):
+        commands = self.run_standins(["--only-arms-detect"])
+        self.assertIn("--only-arms-detect", commands["teleop"])
+        self.assertIn("--enable-hand-control", commands["teleop"])
+        self.assertNotIn("--only-arms-output", commands["deploy"])
+        self.assertNotIn("--only-arms-detect", commands["deploy"])
+        commands = self.run_standins(["--component", "teleop", "--only-arms-detect",
+                                     "--state-host", "192.168.3.164"])
+        self.assertIn("--only-arms-detect", commands["teleop"])
+
     def test_only_arms_output_rejects_old_binary_before_starting_processes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -113,12 +124,33 @@ class InspireTeleopLaunchTests(unittest.TestCase):
         self.assertEqual(list(commands), ["teleop"])
         self.assertEqual(self.option(commands["teleop"], "--zmq_feedback_host"), "192.168.3.164")
 
+    def test_only_arms_detect_rejects_deploy_without_arm_position_support(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deploy = root / "gear_sonic_deploy"
+            (deploy / "target/release").mkdir(parents=True)
+            (deploy / "deploy.sh").touch()
+            binary = deploy / "target/release/g1_deploy_onnx_ref"
+            python = root / ".venv_teleop/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            args = launcher.parse_args(["--only-arms-detect", "--check"])
+            with patch.object(launcher.shutil, "which", return_value="tmux"), \
+                    patch.object(launcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                binary.write_bytes(b"--disable-dex3-hands --only-arms-output")
+                with self.assertRaisesRegex(RuntimeError, "requires arm_position support"):
+                    launcher.check_prerequisites(args, root)
+                binary.write_bytes(b"--disable-dex3-hands arm_position")
+                launcher.check_prerequisites(args, root)
+
     def test_invalid_configuration_never_starts_processes(self):
         for argv in (["sim"], ["lo"], ["--zmq-port", "0"], ["--zmq-port", "5557"],
                      ["--inspire-left-ip", "192.168.123.210"], ["--session", "bad;name"],
                      ["--inspire-left-thumb-hold-rate", "51"],
                      ["--inspire-close-angles", "1000", "250", "250", "250", "300"],
                      ["--component", "teleop", "--only-arms-output"],
+                     ["--component", "deploy", "--only-arms-detect"],
+                     ["--only-arms-output", "--only-arms-detect"],
                      ["--teleop-host", "192.168.3.2"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()), \
                     patch.object(launcher.subprocess, "run") as run:

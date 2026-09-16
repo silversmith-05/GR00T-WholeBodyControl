@@ -144,6 +144,45 @@ class DeployLaunchTests(unittest.TestCase):
         result = self.run_deploy(["--only-arms-output", "sim"], expect_failure=True)
         self.assertIn("rebuild g1_deploy_onnx_ref with --only-arms-output", result.stderr)
 
+    def test_only_arms_detect_collection_preserves_full_body_and_hand_control(self):
+        config = tyro.cli(launcher.DataCollectionLaunchConfig, args=[
+            "--pico-only-arms-detect", "--hand-backend", "inspire", "--enable-hand-control",
+            "--no-camera-web", "--no-camera-viewer",
+        ])
+        self.assertTrue(config.pico_only_arms_detect)
+        commands = self.launch_commands(config)
+        deploy = next(command for command in commands if "./deploy.sh" in command)
+        actual = self.run_deploy(deploy[deploy.index("./deploy.sh") + 1:])
+        self.assertNotIn("--only-arms-output", actual)
+        self.assertNotIn("--only-arms-detect", actual)
+        teleop = next(command for command in commands
+                      if "gear_sonic/scripts/pico_manager_thread_server.py" in command)
+        self.assertIn("--only-arms-detect", teleop)
+        self.assertIn("--enable-hand-control", teleop)
+
+    def test_only_arms_detect_rejects_incompatible_collection_modes(self):
+        for kwargs in ({"deploy_only_arms_output": True}, {"pico_manager": False},
+                       {"deploy_input_type": "keyboard"}, {"pico_waist_tracking": True}):
+            config = launcher.DataCollectionLaunchConfig(pico_only_arms_detect=True, **kwargs)
+            with self.subTest(kwargs=kwargs), redirect_stdout(io.StringIO()), \
+                    patch.object(launcher.subprocess, "run") as run:
+                with self.assertRaises(SystemExit):
+                    launcher._check_prerequisites(config)
+                run.assert_not_called()
+
+    def test_only_arms_detect_collection_rejects_old_deploy_binary(self):
+        config = launcher.DataCollectionLaunchConfig(pico_only_arms_detect=True)
+        output = io.StringIO()
+        with patch.object(Path, "exists", return_value=True), \
+                patch.object(Path, "is_file", return_value=True), \
+                patch.object(Path, "read_bytes", return_value=b"--only-arms-output"), \
+                patch.object(launcher.shutil, "which", return_value="tmux"), redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                launcher._check_prerequisites(config)
+            self.assertIn("arm_position support", output.getvalue())
+            with patch.object(Path, "read_bytes", return_value=b"arm_position"):
+                launcher._check_prerequisites(config)
+
     def test_cli_accepts_upstream_gains_with_inspire_and_camera_options(self):
         config = tyro.cli(launcher.DataCollectionLaunchConfig, args=[
             "--deploy-motor-kp-scale", "4,10=1.5", "--deploy-motor-kd-scale", "4-5=0.8",

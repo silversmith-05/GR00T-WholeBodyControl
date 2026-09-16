@@ -560,7 +560,8 @@ class YawAccumulator:
         return self.heading
 
 
-def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndarray):
+def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndarray,
+                            *, only_arms_detect: bool = False):
     """
     Compute local joints and body orientation from provided body_poses_np.
     """
@@ -581,9 +582,22 @@ def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndar
 
     pose_aa = np.array([rot.as_rotvec() for rot in local_rots])
 
+    if only_arms_detect:
+        # Keep the original LOCAL SMPL rotations along both arm chains:
+        # collars, shoulders, elbows and wrists (SMPL joint IDs, including root).
+        # Recompute FK after masking so elbows/wrists stay consistent with the
+        # neutral torso; replacing Cartesian lower-body points would not do so.
+        arm_joint_ids = (13, 14, 16, 17, 18, 19, 20, 21)
+        neutral_pose = np.zeros_like(pose_aa)
+        neutral_pose[list(arm_joint_ids)] = pose_aa[list(arm_joint_ids)]
+        # Inverse of process_smpl_joints' Y-up conversion and SMPL base removal.
+        # This produces identity body_quat_w (upright robot heading).
+        neutral_pose[0] = [0.0, np.pi / 2, 0.0]
+        pose_aa = neutral_pose
+
     body_pose = torch.from_numpy(pose_aa[1:].flatten()).float().to(device).unsqueeze(0)
     global_orient = torch.from_numpy(pose_aa[0]).float().to(device).unsqueeze(0)
-    transl = torch.from_numpy(positions[0]).float().to(device).unsqueeze(0)
+    transl = torch.from_numpy(np.zeros(3) if only_arms_detect else positions[0]).float().to(device).unsqueeze(0)
 
     return process_smpl_joints(body_pose, global_orient, transl)
 
@@ -968,6 +982,7 @@ class ThreePointPose:
         enable_smpl_vis: bool = False,
         log_prefix: str = "ThreePointPose",
         robot_model=None,
+        only_arms_detect: bool = False,
     ):
         """
         Initialize 3-point pose processor.
@@ -980,8 +995,10 @@ class ThreePointPose:
             log_prefix: Prefix for log messages
             robot_model: Optional pre-instantiated RobotModel. If None, will create one.
                         Used for FK-based calibration (no display required).
+            only_arms_detect: Keep the original pelvis-relative wrists and fix the neck target upright.
         """
         self.log_prefix = log_prefix
+        self.only_arms_detect = only_arms_detect
         self.with_g1_robot = with_g1_robot
         self.enable_waist_tracking = enable_waist_tracking
         self.enable_smpl_vis = enable_smpl_vis
@@ -1065,6 +1082,11 @@ class ThreePointPose:
 
         # Apply calibration to get the final pose
         vr_3pt_pose = self._apply_calibration(vr_3pt_pose_raw)
+        if self.only_arms_detect:
+            # Fixed upright torso target, same neutral neck geometry as the
+            # existing calibrated VR3PT path. Human torso pose is not a target.
+            vr_3pt_pose[2] = [0, 0, self.TORSO_LINK_OFFSET_Z + self.NECK_LINK_LENGTH,
+                              1, 0, 0, 0]
 
         if self.vr3pt_visualizer is not None:
             self.vr3pt_visualizer.update_from_vr_pose(vr_3pt_pose, waist_scale=1.0)
@@ -1253,6 +1275,7 @@ class PoseStreamer:
         record_format: str,
         log_prefix: str = "PoseLoop",
         hand_backend: str = "dex3",
+        only_arms_detect: bool = False,
     ):
         self.socket = socket
         self.reader = reader
@@ -1260,6 +1283,7 @@ class PoseStreamer:
         self.target_fps = target_fps
         self.record_dir = record_dir
         self.log_prefix = log_prefix
+        self.only_arms_detect = only_arms_detect
 
         # Injected dependencies
         self.reader = reader
@@ -1353,7 +1377,8 @@ class PoseStreamer:
             return
 
         latest_data = compute_from_body_poses(
-            self.parent_indices, self.device, sample["body_poses_np"]
+            self.parent_indices, self.device, sample["body_poses_np"],
+            only_arms_detect=self.only_arms_detect,
         )
         left_menu_button, left_trigger, right_trigger, left_grip, right_grip = get_controller_inputs(
             self.reader
@@ -1510,8 +1535,9 @@ class PoseStreamer:
             self.buffer_cleared = False
 
         # Get joystick axes for yaw accumulation
-        _, _, rx, _ = get_controller_axes(self.reader)
-        self.yaw_accumulator.update(rx, self.frame_time)
+        if not self.only_arms_detect:
+            _, _, rx, _ = get_controller_axes(self.reader)
+            self.yaw_accumulator.update(rx, self.frame_time)
 
         # Only send if buffer is full and we're not waiting for fresh data
         if buffer_is_full and not self.buffer_cleared:
@@ -1733,6 +1759,7 @@ class PlannerStreamer:
         zmq_feedback_host: str = "localhost",
         zmq_feedback_port: int = 5557,
         hand_backend: str = "dex3",
+        only_arms_detect: bool = False,
     ):
         self.socket = socket
         self.reader = reader
@@ -1753,6 +1780,7 @@ class PlannerStreamer:
 
         # Hand IK solvers for trigger-controlled hand open/close in VR 3PT mode
         self.hand_backend = hand_backend
+        self.only_arms_detect = only_arms_detect
         self.left_hand_ik_solver, self.right_hand_ik_solver = (
             init_hand_ik_solvers() if hand_backend == "dex3" else (None, None)
         )
@@ -1763,7 +1791,23 @@ class PlannerStreamer:
 
     def save_upper_body_position_target(self):
         """Poll feedback and save upper body position target."""
+        return self._poll_feedback_for_transition()
+
+    def _poll_feedback_for_transition(self):
+        # A failed transition out of FROZEN must not erase its held targets.
+        target_fields = ("upper_body_position_target", "left_hand_position_target",
+                         "right_hand_position_target")
+        previous = {key: getattr(self.feedback_reader, key) for key in target_fields}
         self.feedback_reader.poll_feedback()
+        if self.only_arms_detect:
+            q = self.feedback_reader.full_body_q_measured
+            if q is None or np.shape(q) != (29,) or not np.isfinite(q).all():
+                for key, value in previous.items():
+                    setattr(self.feedback_reader, key, value)
+                print("[only-arms-detect] No valid robot pose; keep current mode and held targets. "
+                      "Retry the mode switch after feedback is available.")
+                return False
+        return True
 
     def recalibrate_for_vr3pt(self):
         """
@@ -1773,7 +1817,8 @@ class PlannerStreamer:
         schedules recalibration so VR tracking aligns with the robot's current pose.
         This prevents sudden jumps when entering VR 3PT mode from PLANNER mode.
         """
-        self.feedback_reader.poll_feedback()
+        if not self._poll_feedback_for_transition():
+            return False
         if self.feedback_reader.full_body_q_measured is not None:
             self.three_point.reset_with_measured_q(self.feedback_reader.full_body_q_measured)
             print("[PlannerLoop] VR 3PT recalibration scheduled with measured robot pose")
@@ -1784,6 +1829,7 @@ class PlannerStreamer:
                 "using zero body_q as fallback"
             )
             self.three_point.reset_with_measured_q(np.zeros(29, dtype=np.float64))
+        return True
 
     def run_once(self, stream_mode: StreamMode):
         """Execute one iteration of the planner control loop."""
@@ -1794,60 +1840,75 @@ class PlannerStreamer:
                 return
             self.last_xrt_timestamp = xrt_timestamp
 
-            # A+B => next mode; X+Y => previous mode (rising edges)
-            a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons(self.reader)
-            ab_now = bool(a_pressed) and bool(b_pressed)
-            xy_now = bool(x_pressed) and bool(y_pressed)
-            if ab_now and not self.prev_ab:
-                self.mode = LocomotionMode(min(LocomotionMode.INJURED_WALK, self.mode + 1))
-                print(f"[PlannerLoop] Mode -> {self.mode.value}: {self.mode.name}")
-            if xy_now and not self.prev_xy:
-                self.mode = LocomotionMode(max(LocomotionMode.IDLE, self.mode - 1))
-                print(f"[PlannerLoop] Mode -> {self.mode.value}: {self.mode.name}")
-            self.prev_ab = ab_now
-            self.prev_xy = xy_now
-
-            # Read axes/joysticks to control movement, facing, speed and mode
-            lx, ly, rx, ry = get_controller_axes(self.reader)
-
-            # Facing from RIGHT stick: continuous yaw based on rx (right = turn right, left = turn left)
-            facing = self.yaw_accumulator.update(rx, self.dt)
-
-            raw_mag = np.hypot(lx, ly)
-            raw_mag = np.clip(raw_mag, 0.0, 1.0)
-            if np.abs(raw_mag) < JOYSTICK_DEADZONE:
-                mag = 0.0
-                speed = -1.0
+            if self.only_arms_detect:
+                # Preserve the initial standing request regardless of sticks,
+                # mode chords or thumb buttons. The WBC still balances all joints.
+                self.mode = LocomotionMode.IDLE
                 mode_to_send = LocomotionMode.IDLE
+                movement = [0.0, 0.0, 0.0]
+                facing = [1.0, 0.0, 0.0]
+                speed = -1.0
             else:
-                mag = (raw_mag - JOYSTICK_DEADZONE) / (1.0 - JOYSTICK_DEADZONE)
-                if mag > 1.0:
-                    mag = 1.0
-                mode_to_send = self.mode
+                # A+B => next mode; X+Y => previous mode (rising edges)
+                a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons(self.reader)
+                ab_now = bool(a_pressed) and bool(b_pressed)
+                xy_now = bool(x_pressed) and bool(y_pressed)
+                if ab_now and not self.prev_ab:
+                    self.mode = LocomotionMode(min(LocomotionMode.INJURED_WALK, self.mode + 1))
+                    print(f"[PlannerLoop] Mode -> {self.mode.value}: {self.mode.name}")
+                if xy_now and not self.prev_xy:
+                    self.mode = LocomotionMode(max(LocomotionMode.IDLE, self.mode - 1))
+                    print(f"[PlannerLoop] Mode -> {self.mode.value}: {self.mode.name}")
+                self.prev_ab = ab_now
+                self.prev_xy = xy_now
 
-                if self.mode == LocomotionMode.SLOW_WALK:
-                    speed = 0.1 + 0.5 * mag  # 0.1 .. 0.6
-                elif self.mode == LocomotionMode.WALK:
+                # Read axes/joysticks to control movement, facing, speed and mode
+                lx, ly, rx, ry = get_controller_axes(self.reader)
+
+                # Facing from RIGHT stick: continuous yaw based on rx (right = turn right, left = turn left)
+                facing = self.yaw_accumulator.update(rx, self.dt)
+
+                raw_mag = np.hypot(lx, ly)
+                raw_mag = np.clip(raw_mag, 0.0, 1.0)
+                if np.abs(raw_mag) < JOYSTICK_DEADZONE:
+                    mag = 0.0
                     speed = -1.0
-                elif self.mode == LocomotionMode.RUN:
-                    speed = 1.5 + 3 * mag  # 1.5 .. 4.5
+                    mode_to_send = LocomotionMode.IDLE
                 else:
-                    speed = mag  # default 0 .. 1.0
+                    mag = (raw_mag - JOYSTICK_DEADZONE) / (1.0 - JOYSTICK_DEADZONE)
+                    if mag > 1.0:
+                        mag = 1.0
+                    mode_to_send = self.mode
 
-            denom = raw_mag if raw_mag > 0.0 else 1.0
-            scale = mag / denom
-            movement_local = np.array([-lx, ly]) * scale
-            perp_x, perp_y = -facing[1], facing[0]
-            rotation_facing = np.array([[perp_x, perp_y], [facing[0], facing[1]]])
-            movement_global = rotation_facing @ movement_local
+                    if self.mode == LocomotionMode.SLOW_WALK:
+                        speed = 0.1 + 0.5 * mag  # 0.1 .. 0.6
+                    elif self.mode == LocomotionMode.WALK:
+                        speed = -1.0
+                    elif self.mode == LocomotionMode.RUN:
+                        speed = 1.5 + 3 * mag  # 1.5 .. 4.5
+                    else:
+                        speed = mag  # default 0 .. 1.0
 
-            movement = [movement_global[0], movement_global[1], 0.0]
+                denom = raw_mag if raw_mag > 0.0 else 1.0
+                scale = mag / denom
+                movement_local = np.array([-lx, ly]) * scale
+                perp_x, perp_y = -facing[1], facing[0]
+                rotation_facing = np.array([[perp_x, perp_y], [facing[0], facing[1]]])
+                movement_global = rotation_facing @ movement_local
+
+                movement = [movement_global[0], movement_global[1], 0.0]
 
             upper_body_position = None
+            arm_position = None
             left_hand_position = None
             right_hand_position = None
             if stream_mode == StreamMode.PLANNER_FROZEN_UPPER_BODY:
-                upper_body_position = self.feedback_reader.upper_body_position_target
+                if self.only_arms_detect:
+                    # Upper-body order starts with waist yaw/roll/pitch. Send
+                    # only the 14 arm targets; the planner keeps the waist.
+                    arm_position = self.feedback_reader.upper_body_position_target[3:]
+                else:
+                    upper_body_position = self.feedback_reader.upper_body_position_target
                 left_hand_position = self.feedback_reader.left_hand_position_target
                 right_hand_position = self.feedback_reader.right_hand_position_target
 
@@ -1889,6 +1950,7 @@ class PlannerStreamer:
                 speed=speed,
                 height=-1.0,
                 upper_body_position=upper_body_position,
+                arm_position=arm_position,
                 left_hand_position=left_hand_position if self.hand_backend == "dex3" else None,
                 right_hand_position=right_hand_position if self.hand_backend == "dex3" else None,
                 vr_3pt_position=vr_3pt_position,
@@ -1940,6 +2002,7 @@ def run_pico_manager(
     inspire_left_thumb_hold_rate: float = 50.0,
     inspire_right_thumb_hold_rate: float = 50.0,
     inspire_close_angles: tuple = (250, 250, 250, 250, 300),
+    only_arms_detect: bool = False,
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
@@ -1951,6 +2014,8 @@ def run_pico_manager(
         raise ValueError("Unknown hand backend")
     if enable_hand_control and hand_backend != "inspire":
         raise ValueError("--enable-hand-control requires --hand-backend inspire")
+    if only_arms_detect and enable_waist_tracking:
+        raise ValueError("--only-arms-detect cannot be combined with --waist_tracking")
     if hand_backend == "inspire":
         from gear_sonic.utils.teleop.inspire_hand_controller import ThumbRotationConfig, validate_close_angles
         inspire_close_angles = validate_close_angles(inspire_close_angles)
@@ -1980,6 +2045,7 @@ def run_pico_manager(
         enable_waist_tracking=enable_waist_tracking,
         enable_smpl_vis=enable_smpl_vis,
         log_prefix="PoseLoop",
+        only_arms_detect=only_arms_detect,
     )
 
     pose_streamer = PoseStreamer(
@@ -1993,6 +2059,7 @@ def run_pico_manager(
         record_format=record_format,
         log_prefix="PoseLoop",
         hand_backend=hand_backend,
+        only_arms_detect=only_arms_detect,
     )
     planner_streamer = PlannerStreamer(
         socket=socket,
@@ -2002,6 +2069,7 @@ def run_pico_manager(
         zmq_feedback_host=zmq_feedback_host,
         zmq_feedback_port=zmq_feedback_port,
         hand_backend=hand_backend,
+        only_arms_detect=only_arms_detect,
     )
 
     # State machine diagram:
@@ -2020,6 +2088,11 @@ def run_pico_manager(
     #   POSE_PAUSE: left_menu_button held --> POSE_PAUSE, released --> POSE
     #
     print("Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy")
+    if only_arms_detect:
+        print("[only-arms-detect] Original SMPL arm tracking with neutral legs/torso/root. "
+              "AXBY=start/stop, A+X=IDLE/SMPL, B+Y=freeze arms/resume SMPL. "
+              "Left stick click retains the original optional VR3PT sub-mode. "
+              "Human lower-body motion and joystick locomotion are ignored.")
     current_mode = StreamMode.OFF
     # Track which mode VR_3PT was entered from, so left_axis_click returns to it.
     # Will be either PLANNER or PLANNER_FROZEN_UPPER_BODY.
@@ -2138,6 +2211,16 @@ def run_pico_manager(
                 elif by_pressed and not prev_by_pressed:
                     new_mode = StreamMode.POSE
 
+            if only_arms_detect and new_mode != current_mode:
+                # Validate snapshots before changing the hand lifecycle. SMPL
+                # entry itself follows the original path without VR calibration.
+                if (new_mode == StreamMode.PLANNER_VR_3PT
+                        and not planner_streamer.recalibrate_for_vr3pt()):
+                    new_mode = current_mode
+                elif (new_mode == StreamMode.PLANNER_FROZEN_UPPER_BODY
+                        and not planner_streamer.save_upper_body_position_target()):
+                    new_mode = current_mode
+
             # Cancel/submit before potentially expensive body mode transitions.
             if hands is not None:
                 hand_bridge.update(reader, left_trigger_mgr, right_trigger_mgr, new_mode.value,
@@ -2170,11 +2253,13 @@ def run_pico_manager(
                     # Always re-grab the latest robot state as frozen targets,
                     # whether entering from POSE or returning from VR_3PT
                     # (the old targets are stale after VR_3PT moved the arms)
-                    planner_streamer.save_upper_body_position_target()
+                    if not only_arms_detect:  # Already captured before switching hand mode.
+                        planner_streamer.save_upper_body_position_target()
                 elif new_mode == StreamMode.PLANNER_VR_3PT:
                     # Recalibrate VR tracking against the robot's actual current pose
                     # (read via g1_debug feedback + FK) to prevent sudden jumps
-                    planner_streamer.recalibrate_for_vr3pt()
+                    if not only_arms_detect:  # New mode already checked feedback before hand arming.
+                        planner_streamer.recalibrate_for_vr3pt()
 
             # Run one iteration of the new mode
             if new_mode == StreamMode.POSE:
@@ -2337,6 +2422,8 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--hand-backend", choices=["dex3", "inspire"], default="dex3")
+    parser.add_argument("--only-arms-detect", action="store_true",
+                        help="Keep original SMPL arm tracking, replace legs/torso/root with neutral references; planner stays IDLE")
     parser.add_argument("--enable-hand-control", action="store_true")
     parser.add_argument("--inspire-left-ip", default="192.168.123.211")
     parser.add_argument("--inspire-right-ip", default="192.168.123.210")
@@ -2351,6 +2438,8 @@ if __name__ == "__main__":
     parser.add_argument("--inspire-close-angles", type=int, nargs=5, default=(250,250,250,250,300),
                         metavar=("LITTLE", "RING", "MIDDLE", "INDEX", "THUMB_BEND"))
     args = parser.parse_args()
+    if args.only_arms_detect and (not args.manager or args.waist_tracking):
+        parser.error("--only-arms-detect requires --manager and cannot use --waist_tracking")
     if args.hand_backend == "inspire" and not args.manager:
         parser.error("Inspire requires --manager for mode and lifecycle protection")
     if args.enable_hand_control and args.hand_backend != "inspire":
@@ -2409,6 +2498,7 @@ if __name__ == "__main__":
             inspire_left_thumb_hold_rate=args.inspire_left_thumb_hold_rate,
             inspire_right_thumb_hold_rate=args.inspire_right_thumb_hold_rate,
             inspire_close_angles=args.inspire_close_angles,
+            only_arms_detect=args.only_arms_detect,
         )
     else:
         # Run legacy single-thread pose streaming

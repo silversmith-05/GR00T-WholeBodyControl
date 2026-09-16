@@ -29,7 +29,58 @@ cd /home/unitree/GR00T-WholeBodyControl
 
 身体启停和模式切换沿用 Pico manager：首次 `A+B+X+Y` 启动，`A+X` 切到全身 POSE；运行中 `A+B+X+Y` 停控。因时手沿用现有逻辑：进入允许的模式后先松开 trigger 和面键建立基线，再按 trigger 闭合、松开放开。左手 X/Y、右手 A/B 调整拇指旋转，单击和长按规则详见 [因时手控制说明](inspire_hand_data_collection.md#左右拇指旋转操作)。
 
-## 吊装双臂模式
+## 双臂输入模式：only-arms-detect
+
+`--only-arms-detect` 沿用原版 **SMPL 双臂跟踪**和因时手控制，只将人的腿、脊柱、颈部及整体朝向输入替换为中立参考。保留肩、肘、腕信息，不再将 A+X 跟踪替换成 VR3PT。第一次 AXBY 仍启动 IDLE 站立；A+X 跟踪期间使用原版 SMPL 编码模式，腿腰由全身策略跟随中立参考并参与平衡，**不是持续运行 IDLE planner，也不是固定实际关节角**。
+
+B+Y 只冻结双臂需要部署端支持新的 `arm_position` 字段。首次使用前，在实际运行 C++ deploy 的机器上更新源码并编译（NX 上需本机编译）：
+
+```bash
+cmake --build gear_sonic_deploy/build --target g1_deploy_onnx_ref -j2
+```
+
+```bash
+./start_inspire_teleop.sh --only-arms-detect --check
+./start_inspire_teleop.sh --only-arms-detect --dry-run
+./start_inspire_teleop.sh --only-arms-detect
+```
+
+操作顺序：
+
+1. 第一次 `A+B+X+Y` 启动 IDLE 站立，与原入口一致。
+2. 松开按键，待机器人站稳后按 `A+X` 进入原版 SMPL 跟踪路径；再按 `A+X` 返回 IDLE。肩、肘、腕使用原局部旋转转换、FK、时间插值和手腕分解，不做 VR3PT 的实测手腕重校准。
+3. SMPL 跟踪时按 `B+Y`，切到原 `PLANNER_FROZEN_UPPER_BODY` 状态，只下发当前实测双臂共 **14 个关节**作为固定参考；腿腰的位置和速度参考由 IDLE planner 提供。再次 `B+Y` 返回 SMPL 跟踪。长按组合键只切换一次；缺少有效机器人关节反馈时不进入冻结。
+4. 左摇杆按下仍是原版可选的 VR3PT 子模式，与 A+X 的 SMPL 跟踪不同：从 IDLE/冻结进入，再按返回来源模式；VR3PT 中 A+X 或 B+Y 均返回 SMPL。VR3PT 仅提供手腕/neck 约束，肘部姿态不保证与 SMPL 相同。进入 VR3PT 时仍需实测反馈重校准。SMPL 中左菜单键暂停/恢复也保留原规则。
+5. 两手 trigger、拇指旋转沿用原规则：冻结期间取消新手部动作，恢复跟踪后先松键建立基线。因时手的原采集有效性规则不变。
+6. `A+B+X+Y` 仍为停控，优先于模式切换。
+
+SMPL 输入先按原版由全局旋转计算局部旋转，仅保留 SMPL 关节 `13,14,16,17,18,19,20,21`（左右锁骨、肩、肘、腕），其他局部旋转归零，并设定产生直立根朝向的参考旋转。随后运行原版 FK，保持肩肘腕几何一致；没有修改手腕为相对躯干坐标系。站立/冻结期间 planner 输入仍固定为 `IDLE`、零移动、初始朝向、默认速度/高度；SMPL 期间禁止摇杆叠加转向。人的腿腰动作不会成为下发的腿腰参考。
+
+跟踪复用原版 `pose` 协议 v3，C++ 使用原 SMPL encoder mode 2，无需新增模型或修改 VLA token 协议。冻结继续使用 14 维 `arm_position` 字段，C++ 在写入策略参考时跳过腰。普通模式仍发送原来的 17 维 `upper_body_position`。本模式不需要新的 C++ 开关，也不会传入 `--only-arms-output`。本机启动器会检查部署二进制是否支持新字段。两种模式互斥：
+
+| 模式 | 人体输入 | 腿腰电机 |
+| --- | --- | --- |
+| 默认 | 原全身跟踪及模式切换 | 原全身控制 |
+| `--only-arms-detect` | 原版 SMPL 双臂 + 灵巧手，腿腰输入为中立参考 | 保留全身策略控制，关节角允许调整 |
+| `--only-arms-output` | 原遥操作输入 | 禁用，吊装使用 |
+
+分机运行时把 `--only-arms-detect` 传给 `--component teleop`，deploy 保持全身输出，并在部署机器上完成上述编译；teleop 单机检查无法验证远端二进制。不要在另一台机器上启用 `--only-arms-output`；单独的 `--component deploy` 不接受 detect 参数。
+
+采集入口对应 `--pico-only-arms-detect`，例如：
+
+```bash
+.venv_data_collection/bin/python gear_sonic/scripts/launch_data_collection.py \
+  --pico-only-arms-detect \
+  --hand-backend inspire --enable-hand-control \
+  --camera-host 192.168.123.164 --record-wrist-cameras \
+  --task-prompt "pick up the ball" --dataset-name only_arms_detect_ball
+```
+
+先停掉已有控制会话，再启动采集入口。`start_wired_real.sh` 不转发参数，使用它时需把 `--pico-only-arms-detect` 加入脚本内的 Python 参数列表。本模式要求 `--pico-manager` 与 `--deploy-input-type zmq_manager`，不能同时使用 `--deploy-only-arms-output` 或 `--pico-waist-tracking`。
+
+采集格式保持不变：A+X/B+Y 返回跟踪时 `teleop.stream_mode=1`，原采集器记录 `teleop.smpl_pose` / `teleop.smpl_joints`；冻结仍为 `3`，手动进入 VR3PT 才是 `5`。全身 `observation.state` / `action.wbc` 仍为 29 维。`action.hand` / `action.thumb_rotation` 不变。已做离线几何、消息、状态切换和采集兼容性验证；肘部外扩是否消除、SMPL 中立参考下的站立效果仍需实机确认。
+
+## 吊装双臂输出模式：only-arms-output
 
 新增可选 `--only-arms-output`；不传时仍为原全身控制。先在实际运行 C++ deploy 的机器上更新源码并重新编译（NX 上需本机编译，不能复制工作站的 x86 二进制）：
 

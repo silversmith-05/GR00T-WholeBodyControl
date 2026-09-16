@@ -35,8 +35,11 @@ def parse_args(argv=None):
     parser.add_argument("--zmq-out-port", type=int, default=5557)
     parser.add_argument("--pico-input-source", choices=("xrt", "isaac-teleop"), default="xrt")
     parser.add_argument("--read-only-hands", action="store_true", help="Read hand feedback without hand writes")
-    parser.add_argument("--only-arms-output", action="store_true",
-                        help="Enable only arm motors 15-28; disable legs/waist during init/control/stop (robot must be suspended)")
+    arms_mode = parser.add_mutually_exclusive_group()
+    arms_mode.add_argument("--only-arms-output", action="store_true",
+                           help="Enable only arm motors 15-28; disable legs/waist during init/control/stop (robot must be suspended)")
+    arms_mode.add_argument("--only-arms-detect", action="store_true",
+                           help="Use original SMPL arm tracking with neutral legs/torso/root and full-body motor output")
     defaults = DataCollectionLaunchConfig()
     for name in ("inspire_left_ip", "inspire_right_ip", "inspire_port",
                  *[f"inspire_{side}_thumb_{setting}" for side in ("left", "right")
@@ -75,6 +78,8 @@ def parse_args(argv=None):
             raise ValueError("Use --component deploy/teleop when the other component is on another machine")
         if args.only_arms_output and args.component == "teleop":
             raise ValueError("--only-arms-output must be set on the deploy component, which sends motor commands")
+        if args.only_arms_detect and args.component == "deploy":
+            raise ValueError("--only-arms-detect must be set on the teleop component, which filters tracking input")
         # Reuse the same hand presets, bounds and argument validation as collection.
         hand_arguments(args)
     except ValueError as exc:
@@ -110,6 +115,8 @@ def build_commands(args, root=REPO):
               "--manager", "--input-source", args.pico_input_source,
               "--port", str(args.zmq_port), "--zmq_feedback_host", args.state_host,
               "--zmq_feedback_port", str(args.zmq_out_port), *teleop_hand]
+    if args.only_arms_detect:
+        teleop.append("--only-arms-detect")
     return [(name, command) for name, command in (("deploy", deploy), ("teleop", teleop))
             if args.component in ("both", name)]
 
@@ -129,6 +136,8 @@ def check_prerequisites(args, root=REPO):
             for flag in required:
                 if flag.encode() not in contents:
                     errors.append(f"Rebuild g1_deploy_onnx_ref: this binary does not support {flag}")
+            if args.only_arms_detect and b"arm_position" not in contents:
+                errors.append("Rebuild g1_deploy_onnx_ref: --only-arms-detect requires arm_position support")
     if args.component in ("both", "teleop"):
         python = root / ".venv_teleop/bin/python"
         if not python.is_file():

@@ -39,6 +39,7 @@
 #include "../motion_data_reader.hpp" // For MotionDataReader, MotionSequence
 #include "../math_utils.hpp"         // For float_to_double
 #include "../localmotion_kplanner.hpp" // For PlannerState, MovementState
+#include "../upper_body_reference.hpp"
 
 /**
  * @class InputInterface
@@ -364,17 +365,17 @@ public:
         }
     }
 
-    /// @brief Get upper-body joint target positions (17 DOF, radians).
-    /// @return {true, positions} if upper-body data is available; {false, zeros} otherwise.
-    virtual std::pair<bool, std::array<double, 17>> GetUpperBodyJointPositions() const {
+    /// @brief Get upper-body joint positions and scope (17 DOF or arms only).
+    /// @return {true, targets} if data is available; {false, defaults} otherwise.
+    virtual std::pair<bool, UpperBodyJointPositions> GetUpperBodyJointPositions() const {
         if(!has_upper_body_control_) {
-            return {false, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+            return {false, {}};
         }
         auto buffered_data = upper_body_joint_positions_.GetDataWithTime();
         if (buffered_data.data) {
             return {true, *buffered_data.data};
         }
-        return {false, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+        return {false, {}};
     }
 
     /// @brief Get upper-body joint target velocities (17 DOF, rad/s).
@@ -479,8 +480,8 @@ protected:
     /// VR 5-point orientations (5 quaternions × wxyz = 20 values).
     DataBuffer<std::array<double, 20>> vr_5point_orientation_;
 
-    /// Upper-body target joint positions (17 DOF, radians).
-    DataBuffer<std::array<double, 17>> upper_body_joint_positions_;
+    /// Upper-body target positions and scope, published atomically together.
+    DataBuffer<UpperBodyJointPositions> upper_body_joint_positions_;
     /// Upper-body target joint velocities (17 DOF, rad/s).
     DataBuffer<std::array<double, 17>> upper_body_joint_velocities_;
     
