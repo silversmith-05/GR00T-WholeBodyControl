@@ -211,6 +211,8 @@ show_usage() {
     echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
     echo "  --output-type TYPE      Set the output type (default: ros2)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
+    echo "  --zmq-port PORT         Set the ZMQ action input port (default: 5556)"
+    echo "  --zmq-out-port PORT     Set the ZMQ state output port (default: 5557)"
     echo "  --motor-kp-scale SPEC   Scale Kp for hardware motor indices/ranges"
     echo "  --motor-kd-scale SPEC   Scale Kd for hardware motor indices/ranges"
     echo "  --disable-dex3-hands    Disable legacy hand driver (required for Inspire)"
@@ -254,6 +256,8 @@ MOTION_DATA="$MOTION_DATA_DEFAULT"
 INPUT_TYPE="$INPUT_TYPE_DEFAULT"
 OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
 ZMQ_HOST="$ZMQ_HOST_DEFAULT"
+ZMQ_PORT=5556
+ZMQ_OUT_PORT=5557
 MOTOR_KP_SCALES=()
 MOTOR_KD_SCALES=()
 
@@ -324,6 +328,20 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ZMQ_HOST="$2"
+            shift 2
+            ;;
+        --zmq-port|--zmq-out-port)
+            port_value="${2:-}"
+            if [[ ! "$port_value" =~ ^[0-9]+$ ]] || [[ ${#port_value} -gt 5 ]] ||
+               (( 10#$port_value < 1 || 10#$port_value > 65535 )); then
+                echo "Error: $1 requires a port within 1..65535" >&2
+                exit 1
+            fi
+            if [[ "$1" == "--zmq-port" ]]; then
+                ZMQ_PORT=$((10#$port_value))
+            else
+                ZMQ_OUT_PORT=$((10#$port_value))
+            fi
             shift 2
             ;;
         --motor-kp-scale)
@@ -407,7 +425,7 @@ CHECKPOINT_ENCODER="${CHECKPOINT}_encoder.onnx"
 # ZMQ_HOST is already set from argument parsing above
 
 # Additional deployment flags
-EXTRA_ARGS=()
+EXTRA_ARGS=(--zmq-port "$ZMQ_PORT" --zmq-out-port "$ZMQ_OUT_PORT")
 if [[ "$DISABLE_DEX3_HANDS" == true ]]; then
     EXTRA_ARGS+=("--disable-dex3-hands")
 fi

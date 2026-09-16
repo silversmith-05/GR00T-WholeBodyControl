@@ -2,6 +2,8 @@
 
 This directory contains the source code for the GR00T-WholeBodyControl documentation website.
 
+Local G1 + Inspire deployment: [有线真机部署、只读检查与现场启动](inspire_real_deployment.md).
+
 ## Building Locally
 
 ### Prerequisites

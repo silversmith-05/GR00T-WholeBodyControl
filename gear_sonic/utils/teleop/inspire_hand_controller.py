@@ -212,6 +212,10 @@ class _Cancelled(Exception):
     pass
 
 
+class _Superseded(_Cancelled):
+    """A fresh policy goal replaced an older goal within the same session."""
+
+
 class _HandWorker:
     def __init__(self, config, enabled, factory, *, input_timeout, feedback_timeout,
                  reconnect_delay, poll_hz, thumb_config, close_angles):
@@ -231,6 +235,7 @@ class _HandWorker:
         self.baseline_after = 0.0
         self.next_command_id = 0
         self.settings_ready = False
+        self.policy_deadline = None
         self.hold_direction = 0
         self.hold_token = 0
         self.hold_next = self.hold_credit = 0.0
@@ -252,6 +257,7 @@ class _HandWorker:
         self.pending = None
         self.armed = False
         self.previous = None
+        self.policy_deadline = None
         self.baseline_after = time.monotonic()
         self.hold_direction = 0
         self.hold_token += 1
@@ -375,18 +381,26 @@ class _HandWorker:
 
     def _fresh(self, now):
         return (not self.stop_event.is_set() and self.enabled and self.s["input_valid"]
+                and (self.policy_deadline is None or now < self.policy_deadline)
                 and 0 <= now - self.last_update <= self.input_timeout
                 and 0 <= now - self.s["input_monotonic"] <= self.input_timeout)
 
     def _guard(self, command):
         with self.lock:
-            if (command.epoch != self.epoch or command.command_id != self.s["command_id"]
-                    or not self._fresh(time.monotonic())):
-                raise _Cancelled("input expired, mode changed, or command superseded")
+            if command.epoch != self.epoch or not self._fresh(time.monotonic()):
+                raise _Cancelled("input expired or mode changed")
+            if command.command_id != self.s["command_id"]:
+                if (self.policy_deadline is not None and self.pending is not None
+                        and self.pending.epoch == self.epoch
+                        and self.pending.command_id == self.s["command_id"]):
+                    raise _Superseded(
+                        f"policy command {command.command_id} replaced by {self.s['command_id']}"
+                    )
+                raise _Cancelled("command superseded")
 
     def snapshot(self):
-        now = time.monotonic()
         with self.lock:
+            now = time.monotonic()
             if self.s["input_valid"] and not self._fresh(now):
                 self._reset()
             s = copy.deepcopy(self.s)
@@ -463,6 +477,7 @@ class _HandWorker:
             self.s.update(write_id=command.command_id, write_target=command.target,
                           write_thumb_rotation=command.thumb_rotation, write_status=1)
         status, error = "confirmed", ""
+        superseded = False
         try:
             client.enable_writes()
             # SDK order: configured force, speed=200, then angle. Guard runs before EACH write.
@@ -475,6 +490,8 @@ class _HandWorker:
             else:
                 preset = hand_preset(command.target, command.thumb_rotation, self.close_angles)
             client.apply_preset(preset, guard=lambda: self._guard(command))
+        except _Superseded as exc:
+            status, error, superseded = "cancelled", str(exc), True
         except _Cancelled as exc:
             status, error = "cancelled", str(exc)
         except WriteUnconfirmed as exc:
@@ -487,12 +504,17 @@ class _HandWorker:
             self.s.update(write_status=WRITE_STATUS[status], write_time=time.time(), error=error)
             if status == "confirmed":
                 self.settings_ready = True
-            if status == "cancelled":
+            if status == "cancelled" and not superseded:
                 # A later confirmed write must not hide a partial cancellation
                 # between two telemetry publications during recording.
                 self.s["fault_count"] += 1
             if status in {"failed", "unconfirmed"}:
                 self._reset()
+        if status == "cancelled":
+            LOG.warning(
+                "hand_write_cancelled host=%s command_id=%s superseded=%s reason=%s",
+                self.config.host, command.command_id, superseded, error,
+            )
         if status in {"failed", "unconfirmed"}:
             # Reconnect read-only and require a NEW release/press; never replay.
             raise RuntimeError(f"write {status} (no retry): {error}")
@@ -571,6 +593,8 @@ class InspireHandController:
         self.locks = []
         self.lock_dir = Path(lock_dir)
         self.started = False
+        self.policy_sessions = None
+        self.policy_last_sequence = -1
 
     def start(self):
         if self.started:
@@ -601,9 +625,82 @@ class InspireHandController:
             self.workers[side].adjust_thumb(direction, session)
 
     def cancel(self):
+        self.policy_sessions = None
         self.gesture.reset()
         for worker in self.workers:
             worker.cancel()
+
+    def begin_policy_session(self):
+        """Explicit operator arming; read fresh thumbs, never write registers.
+
+        Unlike Pico release/press arming, the first policy target (including a
+        closed hand) is accepted. Reconnection/reset invalidates these epochs.
+        """
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for worker in self.workers:
+                stack.enter_context(worker.lock)
+            now = time.monotonic()
+            for worker in self.workers:
+                s = worker.s
+                if (not worker.enabled or not s["connected"] or not s["angle_valid"]
+                        or not 0 <= now - s["angle_monotonic"] <= worker.feedback_timeout
+                        or not worker.thumb_config.minimum <= s["angle"][5] <= worker.thumb_config.maximum):
+                    raise RuntimeError("Cannot arm policy hands without enabled, fresh feedback")
+            for worker in self.workers:
+                worker._reset()
+                worker.armed = True
+                worker.last_update = now
+                worker.s.update(armed=True, thumb_rotation=worker.s["angle"][5],
+                                thumb_target_valid=True)
+            self.policy_sessions = tuple(w.epoch for w in self.workers)
+            self.policy_last_sequence = -1
+            return [w.s["thumb_rotation"] for w in self.workers]
+
+    def update_policy(self, targets, *, sequence, sample_monotonic, valid_until):
+        """Submit one synchronized body/hand step, keeping only latest goals.
+
+        The action-window deadline is checked before every SDK register write;
+        refreshing the 50 Hz loop cannot make an expired prediction valid.
+        """
+        from contextlib import ExitStack
+
+        if (len(targets) != 2 or any(t not in (0, 1) for t in targets)
+                or not math.isfinite(valid_until) or not math.isfinite(sample_monotonic)
+                or sequence <= self.policy_last_sequence):
+            self.cancel()
+            raise ValueError("Policy targets must be binary with increasing sequence and finite times")
+        try:
+            with ExitStack() as stack:
+                for worker in self.workers:
+                    stack.enter_context(worker.lock)
+                now = time.monotonic()
+                if self.policy_sessions != tuple(w.epoch for w in self.workers):
+                    raise RuntimeError("Policy hand session invalidated; manual rearming required")
+                for worker in self.workers:
+                    s = worker.s
+                    if (not worker.armed or not worker.enabled or not s["connected"]
+                            or not s["angle_valid"] or not s["thumb_target_valid"]
+                            or not 0 <= now - s["angle_monotonic"] <= worker.feedback_timeout
+                            or not 0 <= now - sample_monotonic <= worker.input_timeout
+                            or now >= valid_until
+                            or (s["input_valid"] and not worker._fresh(now))):
+                        raise RuntimeError("Policy hand input/feedback expired or session is not armed")
+                for worker, target in zip(self.workers, targets):
+                    worker.last_update = now
+                    worker.policy_deadline = valid_until
+                    worker.s.update(input_valid=True, input_time=time.time(),
+                                    input_monotonic=sample_monotonic, trigger=int(target),
+                                    policy_sequence=int(sequence))
+                    if worker.previous != int(target):
+                        worker.previous = int(target)
+                        worker.s.update(target=int(target), target_valid=True)
+                        worker._queue()
+                self.policy_last_sequence = sequence
+        except Exception:
+            self.cancel()
+            raise
 
     def snapshot(self):
         return dict(schema_version=HAND_SCHEMA_VERSION, backend="inspire", model="RH56E2-T1",
