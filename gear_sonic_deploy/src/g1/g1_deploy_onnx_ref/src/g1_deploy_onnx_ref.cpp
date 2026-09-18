@@ -105,9 +105,13 @@
 #include "../include/policy_parameters.hpp"
 #include "../include/motor_gain_scaling.hpp"
 #include "../include/motor_output.hpp"
+#include "../include/arm_replay.hpp"
+#include "../include/arm_replay_config.hpp"
+#include "../include/arm_replay_tracking.hpp"
 
 // Input interface and input handlers
 #include "../include/input_interface/keyboard_handler.hpp"
+#include "../include/input_interface/arm_replay_keyboard.hpp"
 #include "../include/input_interface/gamepad.hpp"
 #include "../include/input_interface/zmq_endpoint_interface.hpp"
 #include "../include/input_interface/interface_manager.hpp"
@@ -268,6 +272,12 @@ class G1Deploy {
 
     DataBuffer<LowState_> low_state_buffer_;
     DataBuffer<MotorCommand> motor_command_buffer_;
+    std::unique_ptr<arm_replay::Replay> arm_replay_;
+    std::optional<std::chrono::steady_clock::time_point> arm_replay_start_;
+    std::optional<arm_replay::Phase> arm_replay_phase_;
+    arm_replay::TrackingLog arm_replay_tracking_;
+    arm_replay::TrackingLog arm_replay_pd_{"[ArmReplayPD]", "previous_control_target"};
+    double arm_replay_elapsed_ = 0.0;
     DataBuffer<IMUState_> imu_torso_buffer_;
     DataBuffer<HeadingState> heading_state_buffer_;
     DataBuffer<MovementState> movement_state_buffer_;
@@ -774,6 +784,15 @@ class G1Deploy {
 
         const auto motion_joint_pos = current_motion_->JointPositions(target_frame);
 
+        if (arm_replay_) {
+          const auto reference = GetArmReplayReference(target_frame,
+              arm_replay_elapsed_ + frame_idx * step_size * control_dt_);
+          const size_t count = joint_indexes.empty() ? 29 : joint_indexes.size();
+          for (size_t j = 0; j < count; ++j)
+            target_buffer[offset + frame_idx * count + j] = reference.q[joint_indexes.empty() ? j : joint_indexes[j]];
+          continue;
+        }
+
         // If body part indexes are empty, gather all joints
         if (joint_indexes.empty()) {
           size_t frame_offset = offset + frame_idx * 29;  // 29 joints per frame
@@ -848,6 +867,15 @@ class G1Deploy {
         }
         
         const auto motion_joint_vel = current_motion_->JointVelocities(target_frame);
+
+        if (arm_replay_) {
+          const auto reference = GetArmReplayReference(target_frame,
+              arm_replay_elapsed_ + frame_idx * step_size * control_dt_);
+          const size_t count = joint_indexes.empty() ? 29 : joint_indexes.size();
+          for (size_t j = 0; j < count; ++j)
+            target_buffer[offset + frame_idx * count + j] = reference.dq[joint_indexes.empty() ? j : joint_indexes[j]];
+          continue;
+        }
 
         // If body part indexes are empty, gather all joints
         if (joint_indexes.empty()) {
@@ -1646,6 +1674,7 @@ class G1Deploy {
 
     /// Populate the token_state observation (either from local encoder or external data).
     bool GatherTokenState(std::vector<double>& target_buffer, size_t offset) {
+      if (arm_replay_ && !is_using_encoder_) return false;
       if (!is_using_encoder_) {
         // No encoder configured; use token_state_data_ (can be set externally via ROS2/ZMQ)
         std::copy(token_state_data_.begin(), token_state_data_.end(), target_buffer.begin() + offset);
@@ -2020,7 +2049,9 @@ class G1Deploy {
       // Build list of modes to try (start with current mode, then all others as fallback)
       std::vector<int> modes_to_try;
       
-      if (!encoder_config_.encoder_modes.empty()) {
+      if (arm_replay_) {
+        modes_to_try.push_back(0);  // No fallback may silently discard the joint reference.
+      } else if (!encoder_config_.encoder_modes.empty()) {
         // Start with intended mode if valid
         if (current_motion_->GetEncodeMode() >= 0) {
           modes_to_try.push_back(current_motion_->GetEncodeMode());
@@ -2113,6 +2144,7 @@ class G1Deploy {
           
           return true;
         } else {
+          if (arm_replay_) return false;
           // This mode failed - warn if it was the intended mode
           if (current_motion_->GetEncodeMode() == intended_encoder_mode && attempt == 0) {
             std::cerr << "⚠ Warning: Intended encoder mode " << intended_encoder_mode 
@@ -2166,7 +2198,8 @@ class G1Deploy {
       double initial_max_close_ratio = 1.0,
       MotorGainScaleConfig motor_gain_scales = {},
       bool enable_dex3_hands = true,
-      bool only_arms_output = false)
+      bool only_arms_output = false,
+      std::unique_ptr<arm_replay::Replay> arm_replay = nullptr)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2189,6 +2222,17 @@ class G1Deploy {
         //env(ORT_LOGGING_LEVEL_WARNING, "G1Deploy"),
         model_path(model_file_path),
         planner_path(planner_file_path) {
+
+      arm_replay_ = std::move(arm_replay);
+      if (arm_replay_) {
+        std::cout << "[ArmReplay] " << arm_replay_->size() << " samples, " << arm_replay_->duration()
+                  << " s. " << arm_replay::implementation
+                  << "; arm reference -> G1 encoder -> SONIC full-body commands."
+                  << "\n[ArmReplay] After Init Done, press ] to start IDLE balance and one replay."
+                  << "\n[ArmReplay] 5 s settle, 3 s reference blend in, trajectory, 3 s blend back to IDLE."
+                  << "\n[ArmReplay] 10 future reference frames at 0.1 s spacing; legs/waist may adapt for balance."
+                  << "\n[ArmReplay] Press O to stop control. Hands are not controlled." << std::endl;
+      }
 
       std::cout << "[INFO] Body motor output: "
                 << (only_arms_output_ ? "only-arms-output (15-28 enabled; legs/waist 0-14 disabled, including init/stop)"
@@ -2462,6 +2506,12 @@ class G1Deploy {
       robot_config["planner_frequency"] = 1.0 / planner_dt_;
       robot_config["is_using_encoder"] = is_using_encoder_;
       robot_config["dex3_hands_enabled"] = enable_dex3_hands_;
+      robot_config["arm_replay_enabled"] = static_cast<bool>(arm_replay_);
+      if (arm_replay_) {
+        robot_config["arm_replay_duration_s"] = arm_replay_->duration();
+        robot_config["arm_replay_samples"] = static_cast<int>(arm_replay_->size());
+        robot_config["arm_replay_method"] = std::string(arm_replay::implementation);
+      }
       robot_config["policy_fp16"] = policy_fp16;
       robot_config["planner_fp16"] = planner_fp16;
 
@@ -2478,7 +2528,11 @@ class G1Deploy {
       }
 
       // Initialize input interface based on type
-      if (input_type == "gamepad") {
+      if (input_type == "arm_replay") {
+        input_interface_ = std::make_unique<ArmReplayKeyboard>();
+        std::cout << "Initialized arm replay keyboard: ] start, O stop; planner fixed to IDLE" << std::endl;
+      }
+      else if (input_type == "gamepad") {
         input_interface_ = std::make_unique<unitree::common::Gamepad>();
         std::cout << "Initialized gamepad input interface" << std::endl;
         std::cout << "  Initial encoder mode: " << initial_encoder_mode_ << std::endl;
@@ -2723,6 +2777,12 @@ class G1Deploy {
       }
       CreateDampingCommand();
       LowCommandWriter();
+      if (arm_replay_start_) {
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - *arm_replay_start_).count();
+        arm_replay_tracking_.finish("stopped", elapsed, std::cout);
+        arm_replay_pd_.finish("stopped", elapsed, std::cout);
+      }
       std::cout << "Stop" << std::endl;
     }
 
@@ -2799,6 +2859,69 @@ class G1Deploy {
       }
 
       return true;
+    }
+
+    // Called with current_motion_mutex_ held; planner data is never modified.
+    arm_replay::JointReference GetArmReplayReference(int frame, double elapsed) const {
+      frame = std::clamp(frame, 0, current_motion_->timesteps - 1);
+      arm_replay::JointReference planner;
+      std::copy_n(current_motion_->JointPositions(frame), 29, planner.q.begin());
+      if (operator_state.play)
+        std::copy_n(current_motion_->JointVelocities(frame), 29, planner.dq.begin());
+      return arm_replay_->reference_at(elapsed, planner);
+    }
+
+    // Freeze one clock value for all encoder observations in this control tick.
+    bool PrepareArmReplayReference() {
+      if (!arm_replay_) return true;
+      if (!is_using_encoder_ || !current_motion_ || current_motion_->timesteps == 0 ||
+          current_motion_->GetNumJoints() != 29) {
+        std::cerr << "[ArmReplay] G1 encoder or 29-joint planner reference unavailable" << std::endl;
+        return false;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (!arm_replay_start_) {
+        arm_replay_start_ = now;
+        std::cout << "[ArmReplayTracking] error=motion_reference-actual, evaluated at feedback receive time; units=rad"
+                  << "\n[ArmReplayPD] error=previous_control_target-actual; not trajectory tracking error"
+                  << "\n[ArmReplay] Reports every 1s; summaries exclude settling/blends" << std::endl;
+      }
+      const double elapsed = std::chrono::duration<double>(now - *arm_replay_start_).count();
+      if (!arm_replay::finite(elapsed) || elapsed < arm_replay_elapsed_) return false;
+      arm_replay_elapsed_ = elapsed;
+      current_motion_->SetEncodeMode(0);
+      const auto phase = arm_replay_->phase_at(elapsed);
+      if (arm_replay_phase_ != phase) {
+        arm_replay_tracking_.set_phase(phase, elapsed, std::cout);
+        arm_replay_pd_.set_phase(phase, elapsed, std::cout);
+        std::cout << "[ArmReplay] " << arm_replay::phase_name(phase) << std::endl;
+        arm_replay_phase_ = phase;
+      }
+      return true;
+    }
+
+    // Distinguish desired motion tracking from the PD offset intentionally
+    // generated by SONIC. The feedback-time reference avoids a one-tick shift.
+    void LogArmReplayTracking() {
+      if (!arm_replay_ || !arm_replay_start_ || !used_low_state_data_.data) return;
+      const auto command = motor_command_buffer_.GetDataWithTime();
+      if (!command.data) return;
+      const auto now = std::chrono::steady_clock::now();
+      const auto seconds = [&](auto time) {
+        return std::chrono::duration<double>(time - *arm_replay_start_).count();
+      };
+      const double feedback_time = seconds(used_low_state_data_.timestamp);
+      if (feedback_time < 0.0) return;
+      const auto reference = GetArmReplayReference(current_frame_, feedback_time);
+      arm_replay::ArmAngles target{}, motion_target{}, actual{};
+      for (size_t j = 0; j < arm_replay::names.size(); ++j) {
+        target[j] = command.data->q_target[j + 15];
+        motion_target[j] = reference.q[isaaclab_to_mujoco[j + 15]];
+        actual[j] = used_low_state_data_.data->motor_state()[j + 15].q();
+      }
+      arm_replay_tracking_.observe(seconds(now), feedback_time, feedback_time, motion_target, actual, std::cout);
+      arm_replay_pd_.observe(seconds(now), seconds(command.timestamp),
+                                   seconds(used_low_state_data_.timestamp), target, actual, std::cout);
     }
 
     /// Get current ROS 2 timestamp (seconds) from the first ROS2 output interface, or 0.0 if none.
@@ -3152,6 +3275,7 @@ class G1Deploy {
         motor_command_tmp.dq_target.at(i) = 0.0;
       }
       apply_motor_gain_scales(motor_gain_scales_, motor_command_tmp);
+      // No arm override here: all 29 targets and last actions belong to SONIC.
       motor_command_buffer_.SetData(motor_command_tmp);
       return true;
     }
@@ -3846,6 +3970,10 @@ class G1Deploy {
           // before the policy is activated (ZMQ PUB has no persistence).
           for (auto& oi : output_interfaces_) { if (oi) oi->publish_config(); }
           if (operator_state.start) {
+            if (arm_replay_ && (!planner_ || !planner_->planner_state_.enabled ||
+                                !planner_->planner_state_.initialized)) {
+              break;  // Do not replay before the original standing planner is ready.
+            }
             // Warn if starting control in token mode without tokens, but allow it
             if (initial_encoder_mode_ == -1 && !first_token_received_) {
               static int warn_count = 0;
@@ -3861,6 +3989,12 @@ class G1Deploy {
           break;
 
         case ProgramState::CONTROL: {
+          if (arm_replay_ && (!planner_ || !planner_->planner_state_.enabled ||
+                              !planner_->planner_state_.initialized)) {
+            std::cerr << "[ArmReplay] Standing planner became unavailable; stopping control" << std::endl;
+            operator_state.stop = true;
+            break;
+          }
           if (!CheckSafety()) {
             std::cout << "[ERROR] Safety check failed, stopping control." << std::endl;
             operator_state.stop = true;
@@ -3933,6 +4067,11 @@ class G1Deploy {
           std::shared_ptr<const MotionSequence> current_motion_copy = nullptr;
           {
             std::lock_guard<std::mutex> lock(current_motion_mutex_);
+            if (!PrepareArmReplayReference()) {
+              operator_state.stop = true;
+              return;
+            }
+            LogArmReplayTracking();
             current_frame_copy = current_frame_;
             current_motion_copy = current_motion_;
             current_encoder_mode_copy = current_motion_copy->GetEncodeMode();
@@ -4135,6 +4274,32 @@ static bool parse_motor_gain_scale_flag(
  * The main loop sleeps until the operator issues a stop signal or ROS2 shuts down.
  */
 int main(int argc, char const* argv[]) {
+  // Offline validation exits before constructing G1Deploy / initializing DDS.
+  if ((argc == 3 || argc == 4) && std::string(argv[1]) == "--check-arm-replay") {
+    try {
+      arm_replay::Replay replay(argv[2]);
+      if (argc == 4)
+        arm_replay::validate_encoder_config(ObservationConfigParser::ParseFullConfig(argv[3]));
+      arm_replay::JointReference planner;
+      for (int hw = 0; hw < 29; ++hw) planner.q[isaaclab_to_mujoco[hw]] = default_angles[hw];
+      // Exercise q/dq interpolation and every phase boundary without model/device I/O.
+      for (double t = 0.0; t <= 12.0 + replay.duration(); t += 0.01) {
+        const auto reference = replay.reference_at(t, planner);
+        for (size_t j = 0; j < arm_replay::names.size(); ++j) {
+          const auto index = isaaclab_to_mujoco[j + 15];
+          if (!arm_replay::finite(reference.q[index]) || !arm_replay::finite(reference.dq[index]) ||
+              reference.q[index] < arm_replay::lower[j] - 1e-9 || reference.q[index] > arm_replay::upper[j] + 1e-9)
+            throw std::runtime_error("Invalid interpolated arm reference");
+        }
+      }
+      std::cout << arm_replay::implementation << " validated: " << replay.size() << " samples, "
+                << replay.duration() << " s; q/dq interpolation checked; no device I/O" << std::endl;
+      return 0;
+    } catch (const std::exception& error) {
+      std::cerr << error.what() << std::endl;
+      return 1;
+    }
+  }
   std::cout << "[DEBUG] Program starting..." << std::endl;
   if (argc < 4) {
     std::cout << "Usage: " << argv[0] << " <network_interface> <policy_file> <motion_data_path> [OPTIONS]"
@@ -4144,7 +4309,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  motion_data_path: path to motion data directory (e.g., reference/bones_072925_test/)" << std::endl;
     std::cout << "\nOptions:" << std::endl;
     std::cout << "  --planner-file <path>: specify planner file (optional)" << std::endl;
-    std::cout << "  --input-type <keyboard|gamepad|gamepad_manager|manager|zmq|zmq_manager";
+    std::cout << "  --input-type <keyboard|arm_replay|gamepad|gamepad_manager|manager|zmq|zmq_manager";
 #if HAS_ROS2
     std::cout << "|ros2";
 #endif
@@ -4165,6 +4330,8 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --motor-kp-scale <motors>=<factor>: scale Kp for hardware motor indices/ranges" << std::endl;
     std::cout << "  --motor-kd-scale <motors>=<factor>: scale Kd for hardware motor indices/ranges" << std::endl;
     std::cout << "  --only-arms-output: enable only arm motors 15-28; disable legs/waist even during init/stop (suspended robot)" << std::endl;
+    std::cout << "  --arm-replay-file <csv>: track arm reference via G1 encoder; requires arm_replay input, encoder, planner, and disabled Dex3" << std::endl;
+    std::cout << "  --check-arm-replay <csv> [obs-config]: offline reference/config validation; no device I/O" << std::endl;
     std::cout << "  --zmq-host <host>: ZMQ server host (default: localhost)" << std::endl;
     std::cout << "  --zmq-port <port>: ZMQ server port (default: 5556)" << std::endl;
     std::cout << "  --zmq-topic <topic>: ZMQ topic/prefix (default: pose)" << std::endl;
@@ -4222,6 +4389,7 @@ int main(int argc, char const* argv[]) {
   bool zmq_verbose = false;
   bool enableDex3Hands = true;
   bool onlyArmsOutput = false;
+  std::string armReplayFile;
   bool enableMotionRecording = false;  // default off; enable with --enable-motion-recording
   int zmq_out_port = 5557;
   std::string zmq_out_topic = "g1_debug";
@@ -4281,12 +4449,12 @@ int main(int argc, char const* argv[]) {
       if (i + 1 < argc) {
         inputType = argv[i + 1];
         // Validate input type based on what's available
-        bool valid_input = (inputType == "keyboard" || inputType == "gamepad" || inputType == "gamepad_manager" || inputType == "zmq" || inputType == "zmq_manager" || inputType == "manager");
+        bool valid_input = (inputType == "keyboard" || inputType == "arm_replay" || inputType == "gamepad" || inputType == "gamepad_manager" || inputType == "zmq" || inputType == "zmq_manager" || inputType == "manager");
 #if HAS_ROS2
         valid_input = valid_input || (inputType == "ros2");
 #endif
         if (!valid_input) {
-          std::cerr << "Error: --input-type must be 'keyboard', 'gamepad', 'gamepad_manager', 'manager', 'zmq', or 'zmq_manager'";
+          std::cerr << "Error: --input-type must be 'keyboard', 'arm_replay', 'gamepad', 'gamepad_manager', 'manager', 'zmq', or 'zmq_manager'";
 #if HAS_ROS2
           std::cerr << ", or 'ros2'";
 #endif
@@ -4380,6 +4548,12 @@ int main(int argc, char const* argv[]) {
       else{
         std::cerr << "old and weak" << std::endl;
       }
+    } else if (std::string(argv[i]) == "--arm-replay-file") {
+      if (i + 1 >= argc || std::string(argv[i + 1]).starts_with("--")) {
+        std::cerr << "--arm-replay-file requires a prepared CSV path" << std::endl;
+        return 1;
+      }
+      armReplayFile = argv[++i];
     } else if (std::string(argv[i]) == "--only-arms-output") {
       onlyArmsOutput = true;
     } else if (std::string(argv[i]) == "--motor-kp-scale") {
@@ -4472,6 +4646,23 @@ int main(int argc, char const* argv[]) {
     }
   }
 
+  std::unique_ptr<arm_replay::Replay> armReplay;
+  if (!armReplayFile.empty() || inputType == "arm_replay") {
+    if (armReplayFile.empty() || inputType != "arm_replay" || onlyArmsOutput || enableDex3Hands ||
+        plannerFile.empty() || encoderFile.empty() || !playbackInputFile.empty()) {
+      std::cerr << "Arm replay requires --arm-replay-file, --input-type arm_replay, --disable-dex3-hands, "
+                << "encoder and planner; incompatible with --only-arms-output and input playback" << std::endl;
+      return 1;
+    }
+    try {
+      arm_replay::validate_encoder_config(ObservationConfigParser::ParseFullConfig(obsConfigPath));
+      armReplay = std::make_unique<arm_replay::Replay>(armReplayFile);
+    } catch (const std::exception& error) {
+      std::cerr << error.what() << std::endl;
+      return 1;
+    }
+  }
+
   std::cout << "[DEBUG] Creating G1Deploy object..." << std::endl;
   G1Deploy custom(
     networkInterface,
@@ -4504,7 +4695,8 @@ int main(int argc, char const* argv[]) {
     initial_max_close_ratio,
     motor_gain_scales,
     enableDex3Hands,
-    onlyArmsOutput
+    onlyArmsOutput,
+    std::move(armReplay)
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   

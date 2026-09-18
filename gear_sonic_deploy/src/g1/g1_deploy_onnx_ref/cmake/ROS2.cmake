@@ -52,6 +52,8 @@ if(NOT ROS2_DISTRO_FOUND)
 endif()
 
 list(REMOVE_DUPLICATES ROS2_INCLUDE_DIRS)
+# Use the CycloneDDS headers bundled with Unitree SDK.
+list(FILTER ROS2_INCLUDE_DIRS EXCLUDE REGEX "/CycloneDDS(/|$)")
 
 # Essential ROS2 libraries for basic pub/sub functionality
 set(ESSENTIAL_LIB_PATTERNS

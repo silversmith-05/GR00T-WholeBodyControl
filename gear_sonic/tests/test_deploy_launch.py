@@ -115,6 +115,50 @@ class DeployLaunchTests(unittest.TestCase):
             "--motor-kd-scale", "4-5=0.8",
         ])
 
+    def test_sdk_dds_libraries_take_priority_after_environment_setup(self):
+        captured_env = self.root / "library_paths.bin"
+        self.make_tool("just",
+                       'printf "%s\\0%s\\0" "$1" "${LD_LIBRARY_PATH-}" >> '
+                       + shlex.quote(str(captured_env)) + '\n'
+                       'if [[ "$1" == run ]]; then printf "%s\\0" "$@" > "$DEPLOY_TEST_ARGS"; fi\n')
+        sdk_lib = self.root / "thirdparty/unitree_sdk2/thirdparty/lib" / os.uname().machine
+        for external_path in ("/external/cyclonedds/lib:/external/ros/lib", ""):
+            with self.subTest(external_path=external_path):
+                captured_env.unlink(missing_ok=True)
+                setup = ("export LD_LIBRARY_PATH=" + shlex.quote(external_path) + "\n"
+                         if external_path else "unset LD_LIBRARY_PATH\n")
+                (self.root / "scripts/setup_env.sh").write_text(setup)
+                self.run_deploy(["--input-type", "zmq_manager", "--output-type", "zmq",
+                                 "--disable-dex3-hands", "test0"])
+                expected = str(sdk_lib) + (":" + external_path if external_path else "")
+                self.assertEqual(captured_env.read_bytes().decode().split("\0")[:-1],
+                                 ["build", expected, "run", expected])
+
+    def test_arm_replay_preflights_and_reaches_binary_without_disabling_legs(self):
+        binary = self.root / "target/release/g1_deploy_onnx_ref"
+        binary.parent.mkdir(parents=True)
+        binary.write_text('#!/bin/bash\n# ARM_REPLAY_G1_ENCODER_V1\n[[ "$1" == --check-arm-replay && "$3" == policy/release/observation_config.yaml ]]\n')
+        binary.chmod(0o755)
+        trajectory = self.root / "prepared arms.csv"
+        trajectory.touch()
+        actual = self.run_deploy(["--input-type", "arm_replay", "--disable-dex3-hands",
+                                  "--arm-replay-file", str(trajectory), "test0"])
+        self.assertIn("arm_replay", actual)
+        self.assertEqual(actual[actual.index("--arm-replay-file") + 1], str(trajectory))
+        self.assertNotIn("--only-arms-output", actual)
+
+    def test_arm_replay_rejects_missing_path_conflicting_mode_and_old_binary(self):
+        for args in (["--arm-replay-file"],
+                     ["--arm-replay-file", "x.csv", "--only-arms-output", "sim"],
+                     ["--arm-replay-file", "x.csv", "--input-type", "arm_replay", "sim"]):
+            with self.subTest(args=args):
+                result = self.run_deploy(args, expect_failure=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("arm replay" if "--only-arms-output" in args else "replay", result.stderr)
+        result = self.run_deploy(["--input-type", "arm_replay", "--disable-dex3-hands",
+                                  "--arm-replay-file", "x.csv", "sim"], expect_failure=True)
+        self.assertIn("rebuild g1_deploy_onnx_ref with arm replay", result.stderr)
+
     def test_collection_only_arms_output_reaches_shell_and_binary_with_hands_and_gains(self):
         binary = self.root / "target/release/g1_deploy_onnx_ref"
         binary.parent.mkdir(parents=True)

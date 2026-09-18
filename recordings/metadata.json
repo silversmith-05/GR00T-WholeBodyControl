@@ -1,0 +1,174 @@
+{
+  "format_version": 1,
+  "status": "completed",
+  "started_at_utc": "2026-09-17T13:49:13.202594+00:00",
+  "ended_at_utc": "2026-09-17T13:49:39.318162+00:00",
+  "stop_reason": "sigint",
+  "error": null,
+  "topic": "rt/lowstate",
+  "interface": "eno2",
+  "domain": 0,
+  "duration_seconds": null,
+  "timeout_seconds": 5.0,
+  "sampling": "all received unique forward ticks; no resampling or interpolation",
+  "timestamp_semantics": "host callback reception times; not robot acquisition times",
+  "tick_semantics": "raw uint32 robot tick; skipped tick values are not a guaranteed packet-loss count",
+  "torque_semantics": "tau_est is motor estimated torque, not measured external contact torque",
+  "units": {
+    "q": "rad",
+    "dq": "rad/s",
+    "tau_est": "N*m",
+    "received_unix_ns": "ns since Unix epoch",
+    "received_monotonic_ns": "ns on this host monotonic clock"
+  },
+  "joints": [
+    {
+      "name": "left_shoulder_pitch_joint",
+      "sdk_index": 15,
+      "arm": "left"
+    },
+    {
+      "name": "left_shoulder_roll_joint",
+      "sdk_index": 16,
+      "arm": "left"
+    },
+    {
+      "name": "left_shoulder_yaw_joint",
+      "sdk_index": 17,
+      "arm": "left"
+    },
+    {
+      "name": "left_elbow_joint",
+      "sdk_index": 18,
+      "arm": "left"
+    },
+    {
+      "name": "left_wrist_roll_joint",
+      "sdk_index": 19,
+      "arm": "left"
+    },
+    {
+      "name": "left_wrist_pitch_joint",
+      "sdk_index": 20,
+      "arm": "left"
+    },
+    {
+      "name": "left_wrist_yaw_joint",
+      "sdk_index": 21,
+      "arm": "left"
+    },
+    {
+      "name": "right_shoulder_pitch_joint",
+      "sdk_index": 22,
+      "arm": "right"
+    },
+    {
+      "name": "right_shoulder_roll_joint",
+      "sdk_index": 23,
+      "arm": "right"
+    },
+    {
+      "name": "right_shoulder_yaw_joint",
+      "sdk_index": 24,
+      "arm": "right"
+    },
+    {
+      "name": "right_elbow_joint",
+      "sdk_index": 25,
+      "arm": "right"
+    },
+    {
+      "name": "right_wrist_roll_joint",
+      "sdk_index": 26,
+      "arm": "right"
+    },
+    {
+      "name": "right_wrist_pitch_joint",
+      "sdk_index": 27,
+      "arm": "right"
+    },
+    {
+      "name": "right_wrist_yaw_joint",
+      "sdk_index": 28,
+      "arm": "right"
+    }
+  ],
+  "csv_columns": [
+    "received_unix_ns",
+    "received_monotonic_ns",
+    "tick",
+    "mode_pr",
+    "mode_machine",
+    "left_shoulder_pitch_joint_q",
+    "left_shoulder_pitch_joint_dq",
+    "left_shoulder_pitch_joint_tau_est",
+    "left_shoulder_roll_joint_q",
+    "left_shoulder_roll_joint_dq",
+    "left_shoulder_roll_joint_tau_est",
+    "left_shoulder_yaw_joint_q",
+    "left_shoulder_yaw_joint_dq",
+    "left_shoulder_yaw_joint_tau_est",
+    "left_elbow_joint_q",
+    "left_elbow_joint_dq",
+    "left_elbow_joint_tau_est",
+    "left_wrist_roll_joint_q",
+    "left_wrist_roll_joint_dq",
+    "left_wrist_roll_joint_tau_est",
+    "left_wrist_pitch_joint_q",
+    "left_wrist_pitch_joint_dq",
+    "left_wrist_pitch_joint_tau_est",
+    "left_wrist_yaw_joint_q",
+    "left_wrist_yaw_joint_dq",
+    "left_wrist_yaw_joint_tau_est",
+    "right_shoulder_pitch_joint_q",
+    "right_shoulder_pitch_joint_dq",
+    "right_shoulder_pitch_joint_tau_est",
+    "right_shoulder_roll_joint_q",
+    "right_shoulder_roll_joint_dq",
+    "right_shoulder_roll_joint_tau_est",
+    "right_shoulder_yaw_joint_q",
+    "right_shoulder_yaw_joint_dq",
+    "right_shoulder_yaw_joint_tau_est",
+    "right_elbow_joint_q",
+    "right_elbow_joint_dq",
+    "right_elbow_joint_tau_est",
+    "right_wrist_roll_joint_q",
+    "right_wrist_roll_joint_dq",
+    "right_wrist_roll_joint_tau_est",
+    "right_wrist_pitch_joint_q",
+    "right_wrist_pitch_joint_dq",
+    "right_wrist_pitch_joint_tau_est",
+    "right_wrist_yaw_joint_q",
+    "right_wrist_yaw_joint_dq",
+    "right_wrist_yaw_joint_tau_est"
+  ],
+  "statistics": {
+    "callbacks": 27012,
+    "frames_enqueued": 25924,
+    "frames_written": 25924,
+    "frames_synced": 25924,
+    "frames_not_confirmed_written": 0,
+    "duplicate_ticks": 1088,
+    "invalid_frames": 0,
+    "queue_overflows": 0,
+    "queue_capacity": 10000,
+    "queue_peak_observed": 7,
+    "queue_pending": 0,
+    "first_tick": 3239005,
+    "last_tick": 3264935,
+    "first_received_unix_ns": 1789652953331271378,
+    "last_received_unix_ns": 1789652979261619291,
+    "first_received_monotonic_ns": 2857452288843,
+    "last_received_monotonic_ns": 2883382637588,
+    "elapsed_sample_seconds": 25.930348745,
+    "unique_frame_hz": 999.7165967541637,
+    "tick_gap_events": 7,
+    "skipped_tick_values": 7,
+    "max_tick_delta": 2,
+    "arrival_interval_ms": {
+      "mean": 1.0002834835860046,
+      "min": 0.245701,
+      "max": 2.47764
+    }
+  }
+}

@@ -217,6 +217,7 @@ show_usage() {
     echo "  --motor-kd-scale SPEC   Scale Kd for hardware motor indices/ranges"
     echo "  --disable-dex3-hands    Disable legacy hand driver (required for Inspire)"
     echo "  --only-arms-output     Enable only arm motors 15-28; disable legs/waist (suspended robot)"
+    echo "  --arm-replay-file CSV  Arm reference via G1 Encoder; use --input-type arm_replay and --disable-dex3-hands"
     echo ""
     echo "Interface modes:"
     echo "  sim              Use loopback interface for simulation (MuJoCo)"
@@ -264,10 +265,19 @@ MOTOR_KD_SCALES=()
 
 DISABLE_DEX3_HANDS=false
 ONLY_ARMS_OUTPUT=false
+ARM_REPLAY_FILE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --arm-replay-file)
+            if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+                echo "Error: --arm-replay-file requires a prepared CSV path" >&2
+                exit 1
+            fi
+            ARM_REPLAY_FILE="$2"
+            shift 2
+            ;;
         --only-arms-output)
             ONLY_ARMS_OUTPUT=true
             shift
@@ -438,6 +448,13 @@ fi
 if [[ "$ONLY_ARMS_OUTPUT" == true ]]; then
     EXTRA_ARGS+=("--only-arms-output")
 fi
+if [[ -n "$ARM_REPLAY_FILE" ]]; then
+    if [[ "$ONLY_ARMS_OUTPUT" == true || "$INPUT_TYPE" != arm_replay || "$DISABLE_DEX3_HANDS" != true ]]; then
+        echo "Error: arm replay requires full-body output, --input-type arm_replay and --disable-dex3-hands" >&2
+        exit 1
+    fi
+    EXTRA_ARGS+=("--arm-replay-file" "$ARM_REPLAY_FILE")
+fi
 if [[ "$ENV_TYPE" == "sim" ]]; then
     EXTRA_ARGS+=("--disable-crc-check")
     echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
@@ -552,6 +569,10 @@ set +e  # Temporarily allow errors (for jetson_clocks on non-Jetson systems)
 source scripts/setup_env.sh
 set -e  # Re-enable exit on error
 
+# Keep the SDK's CycloneDDS C and C++ libraries together after ROS environment setup.
+UNITREE_DDS_LIB_DIR="$SCRIPT_DIR/thirdparty/unitree_sdk2/thirdparty/lib/$(uname -m)"
+export LD_LIBRARY_PATH="$UNITREE_DDS_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 # Always build to ensure we have the latest version
 echo "Building the project..."
 just build
@@ -562,6 +583,15 @@ if [[ "$ONLY_ARMS_OUTPUT" == true ]] &&
    ! grep -aq -- '--only-arms-output' target/release/g1_deploy_onnx_ref; then
     echo "Error: rebuild g1_deploy_onnx_ref with --only-arms-output support before deployment." >&2
     exit 1
+fi
+
+if [[ -n "$ARM_REPLAY_FILE" ]]; then
+    if ! grep -aq -- 'ARM_REPLAY_G1_ENCODER_V1' target/release/g1_deploy_onnx_ref; then
+        echo "Error: rebuild g1_deploy_onnx_ref with arm replay G1 Encoder support before deployment." >&2
+        exit 1
+    fi
+    # Validate before the deployment prompt and before any robot connection.
+    target/release/g1_deploy_onnx_ref --check-arm-replay "$ARM_REPLAY_FILE" "$OBS_CONFIG"
 fi
 
 echo ""
